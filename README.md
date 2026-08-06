@@ -206,6 +206,7 @@ TIKTOK_PERSISTENT_HEADLESS=false
 
 ```env
 DATABASE_URL=postgresql://USER:PASSWORD@HOST:PORT/postgres?sslmode=require
+TEAM_PASSWORD=replace-with-a-strong-shared-password
 ```
 
 Supabase 建议使用项目 `Connect` 页面提供的 Pooler 连接串。应用连接池上限
@@ -215,6 +216,11 @@ PostgreSQL 初始化只负责创建表结构和空库默认数据，不会自动
 `data/koc.db`。正式切换前必须使用独立迁移程序复制数据，并核对达人、投稿、
 合同周期、主题申报和全部结算版本。未配置 `DATABASE_URL` 时，本地运行方式和
 SQLite 数据完全不变。
+
+配置 `TEAM_PASSWORD` 后，应用会先显示团队密码登录页。认证结果只保存在当前
+浏览器会话中，侧边栏提供“退出登录”按钮。Streamlit Community Cloud 部署时，
+在应用的 Secrets 设置中添加同名的 `DATABASE_URL` 和 `TEAM_PASSWORD`，不要把
+真实密码提交到 GitHub。
 
 首次迁移到空白 PostgreSQL/Supabase 项目时运行：
 

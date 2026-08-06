@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -19,10 +19,15 @@ class Settings:
     youtube_api_key: str | None
     tiktok_browser_data_dir: Path
     tiktok_persistent_headless: bool
+    team_password: str | None = field(default=None, repr=False)
 
     @property
     def youtube_api_configured(self) -> bool:
         return bool(self.youtube_api_key)
+
+    @property
+    def team_password_configured(self) -> bool:
+        return bool(self.team_password)
 
 def _project_path(value: str) -> Path:
     path = Path(value)
@@ -78,6 +83,7 @@ def load_settings(path: Path = SETTINGS_FILE, env_path: Path = ENV_FILE) -> Sett
     env_values = _read_local_env(env_path)
     youtube_api_key = _env_value("YOUTUBE_API_KEY", env_values) or None
     database_url = _env_value("DATABASE_URL", env_values)
+    team_password = _env_value("TEAM_PASSWORD", env_values) or None
     return Settings(
         timezone=values.get("timezone", "Asia/Shanghai"),
         database_path=(
@@ -93,4 +99,5 @@ def load_settings(path: Path = SETTINGS_FILE, env_path: Path = ENV_FILE) -> Sett
         tiktok_persistent_headless=_env_bool(
             "TIKTOK_PERSISTENT_HEADLESS", env_values, False
         ),
+        team_password=team_password,
     )

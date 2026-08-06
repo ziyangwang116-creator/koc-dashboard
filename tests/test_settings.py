@@ -8,6 +8,7 @@ def test_default_timezone_is_beijing_time():
 def test_youtube_key_and_tiktok_browser_settings_load_from_env_file(tmp_path, monkeypatch):
     for name in (
         "DATABASE_URL",
+        "TEAM_PASSWORD",
         "YOUTUBE_API_KEY",
         "TIKTOK_PERSISTENT_HEADLESS",
     ):
@@ -17,6 +18,7 @@ def test_youtube_key_and_tiktok_browser_settings_load_from_env_file(tmp_path, mo
     env_file = tmp_path / ".env"
     env_file.write_text(
         "YOUTUBE_API_KEY=test-only-key\n"
+        "TEAM_PASSWORD=test-team-password\n"
         "TIKTOK_PERSISTENT_HEADLESS=true\n",
         encoding="utf-8",
     )
@@ -25,6 +27,8 @@ def test_youtube_key_and_tiktok_browser_settings_load_from_env_file(tmp_path, mo
 
     assert settings.youtube_api_key == "test-only-key"
     assert settings.youtube_api_configured is True
+    assert settings.team_password == "test-team-password"
+    assert settings.team_password_configured is True
     assert settings.tiktok_persistent_headless is True
     assert settings.tiktok_browser_data_dir.name == "tiktok_browser_data"
 
@@ -41,6 +45,16 @@ def test_database_url_overrides_local_sqlite_path(tmp_path, monkeypatch):
     settings = load_settings(settings_file, tmp_path / ".env")
 
     assert settings.database_path == database_url
+
+
+def test_team_password_is_not_exposed_in_settings_repr(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEAM_PASSWORD", "private-team-password")
+    settings_file = tmp_path / "settings.json"
+    settings_file.write_text("{}", encoding="utf-8")
+
+    settings = load_settings(settings_file, tmp_path / ".env")
+
+    assert "private-team-password" not in repr(settings)
 
 
 def test_tiktok_browser_visibility_can_be_overridden_by_environment(tmp_path, monkeypatch):

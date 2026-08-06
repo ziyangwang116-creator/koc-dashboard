@@ -4,17 +4,21 @@ import streamlit as st
 
 from config.settings import load_settings
 from database.db import init_db
+from ui.auth import render_logout, require_team_authentication
 from ui.data_processing import render as render_data_processing
 from ui.compensation import render as render_compensation
 from ui.dashboard import DASHBOARD_CSS, render as render_dashboard
 from ui.koc_management import render as render_koc_management
 
 
-settings = load_settings()
-init_db(settings.database_path)
-
 st.set_page_config(page_title="KOC 数据整理工具", page_icon="📊", layout="wide")
 st.markdown(DASHBOARD_CSS, unsafe_allow_html=True)
+
+settings = load_settings()
+if not require_team_authentication(settings.team_password):
+    st.stop()
+
+init_db(settings.database_path)
 
 with st.sidebar:
     st.header("KOC 数据整理工具")
@@ -24,6 +28,7 @@ with st.sidebar:
         key="active_page",
     )
     st.caption("V1.7 · 异业与流量加成联动")
+    render_logout(settings.team_password)
 
 if active_page == "数据整理":
     render_data_processing(settings.database_path, settings.timezone)
