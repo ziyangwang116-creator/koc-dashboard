@@ -64,25 +64,38 @@ _JULY_TRAFFIC_BOOST_PERIOD = "2026-07"
 
 DASHBOARD_CSS = """
 <style>
+  :root {
+    --koc-bg: #f4f7f8;
+    --koc-surface: #ffffff;
+    --koc-surface-soft: #eef4f4;
+    --koc-sidebar: #e8f0f0;
+    --koc-border: #d4dfe1;
+    --koc-border-strong: #b9cacc;
+    --koc-text: #1c2933;
+    --koc-muted: #667781;
+    --koc-primary: #167d83;
+    --koc-primary-hover: #11676c;
+    --koc-primary-soft: #dceced;
+  }
   [data-testid="stAppViewContainer"] {
-    background: #0a1420;
-    color: #e8f1f5;
+    background: var(--koc-bg);
+    color: var(--koc-text);
   }
   [data-testid="stApp"],
   [data-testid="stMain"],
   [data-testid="stMainBlockContainer"] {
-    background: #0a1420;
-    color: #e8f1f5;
+    background: var(--koc-bg);
+    color: var(--koc-text);
   }
   [data-testid="stHeader"] {
-    background: #0a1420;
+    background: rgba(244, 247, 248, 0.96);
   }
   [data-testid="stSidebar"] {
-    background: #0d1b2a;
-    border-right: 1px solid #294255;
+    background: var(--koc-sidebar);
+    border-right: 1px solid var(--koc-border);
   }
   [data-testid="stSidebar"] * {
-    color: #d8e7ed;
+    color: var(--koc-text);
   }
   .block-container {
     max-width: 1560px;
@@ -90,7 +103,7 @@ DASHBOARD_CSS = """
     padding-bottom: 3rem;
   }
   .dashboard-kicker {
-    color: #76bad2;
+    color: var(--koc-primary);
     font-size: 0.78rem;
     font-weight: 700;
     letter-spacing: 0.08em;
@@ -98,127 +111,154 @@ DASHBOARD_CSS = """
     text-transform: uppercase;
   }
   .dashboard-title {
-    color: #edf5f7;
+    color: #17252b;
     font-size: 2rem;
     font-weight: 700;
     line-height: 1.2;
     margin: 0;
   }
   .dashboard-subtitle {
-    color: #9eb2bf;
+    color: var(--koc-muted);
     font-size: 0.95rem;
     margin-top: 0.55rem;
   }
   [data-testid="stMetric"] {
-    background: #112334;
-    border: 1px solid #294255;
+    background: var(--koc-surface);
+    border: 1px solid var(--koc-border);
     border-radius: 6px;
     padding: 0.9rem 1rem;
     min-height: 112px;
+    box-shadow: 0 1px 2px rgba(28, 41, 51, 0.04);
   }
   [data-testid="stMetricLabel"] {
-    color: #9eb2bf;
+    color: var(--koc-muted);
   }
   [data-testid="stMetricValue"] {
-    color: #edf5f7;
+    color: var(--koc-text);
   }
   [data-testid="stDataFrame"] {
-    border: 1px solid #294255;
+    border: 1px solid var(--koc-border);
     border-radius: 6px;
     overflow: hidden;
   }
   [data-testid="stExpander"] {
-    border: 1px solid #294255;
+    border: 1px solid var(--koc-border);
     border-radius: 6px;
-    background: #112334;
+    background: var(--koc-surface);
   }
   [data-testid="stTextInput"] input,
   [data-testid="stNumberInput"] input,
   [data-testid="stDateInput"] input,
+  [data-testid="stTextArea"] textarea,
   [data-baseweb="base-input"] input,
   [data-baseweb="select"] > div {
-    background: #0e1d2c;
-    border-color: #36536a;
-    color: #e8f1f5;
+    background: var(--koc-surface);
+    border-color: var(--koc-border-strong);
+    color: var(--koc-text);
   }
   [data-baseweb="popover"] {
-    background: #112334;
-    border: 1px solid #36536a;
+    background: var(--koc-surface);
+    border: 1px solid var(--koc-border);
   }
   [data-baseweb="menu"] {
-    background: #112334;
+    background: var(--koc-surface);
   }
   [data-baseweb="menu"] li:hover,
   [data-baseweb="select"] [aria-selected="true"] {
-    background: #1b3a4e;
+    background: var(--koc-primary-soft);
   }
   [data-testid="stCaptionContainer"] {
-    color: #8fa6b4;
+    color: var(--koc-muted);
   }
   [data-testid="stAlert"] {
-    background: #132a38;
-    border-color: #356177;
+    background: var(--koc-surface-soft);
+    border-color: var(--koc-border-strong);
   }
   [data-testid="stButton"] > button[kind="primary"] {
-    background: #4c9bb8;
-    border-color: #4c9bb8;
-    color: #07141e;
+    background: var(--koc-primary);
+    border-color: var(--koc-primary);
+    color: #ffffff;
   }
   [data-testid="stButton"] > button {
-    background: #14283a;
-    border-color: #36536a;
-    color: #dcebef;
+    background: var(--koc-surface);
+    border-color: var(--koc-border-strong);
+    color: var(--koc-text);
     border-radius: 5px;
   }
+  [data-testid="stButton"] > button:hover {
+    border-color: var(--koc-primary);
+    color: var(--koc-primary-hover);
+  }
+  [data-testid="stButton"] > button[kind="primary"]:hover {
+    background: var(--koc-primary-hover);
+    border-color: var(--koc-primary-hover);
+    color: #ffffff;
+  }
   [data-testid="stDivider"] {
-    border-color: #294255;
+    border-color: var(--koc-border);
   }
   [data-testid="stVegaLiteChart"] {
-    background: #0f2030;
-    border: 1px solid #294255;
+    background: var(--koc-surface);
+    border: 1px solid var(--koc-border);
     border-radius: 6px;
     padding: 0.5rem;
   }
   [data-baseweb="tab-list"] {
-    border-bottom-color: #294255;
+    border-bottom-color: var(--koc-border);
     gap: 0.25rem;
   }
   [data-baseweb="tab"] {
-    color: #9eb2bf;
-    background: #0e1d2c;
+    color: var(--koc-muted);
+    background: transparent;
     border-radius: 5px 5px 0 0;
   }
   [data-baseweb="tab"][aria-selected="true"] {
-    color: #edf5f7;
-    background: #163348;
+    color: var(--koc-primary-hover);
+    background: var(--koc-primary-soft);
   }
   [data-testid="stForm"],
   [data-testid="stDataEditor"],
   [data-testid="stDataFrame"] > div {
-    background: #112334;
+    background: var(--koc-surface);
   }
   [data-testid="stDataEditor"] [role="grid"],
   [data-testid="stDataFrame"] [role="grid"],
   [data-testid="stDataEditor"] [role="columnheader"],
   [data-testid="stDataFrame"] [role="columnheader"] {
-    background: #0e1d2c;
-    color: #e8f1f5;
-    border-color: #294255;
+    background: var(--koc-surface-soft);
+    color: var(--koc-text);
+    border-color: var(--koc-border);
   }
   [data-testid="stDataEditor"] [role="gridcell"],
   [data-testid="stDataFrame"] [role="gridcell"] {
-    background: #112334;
-    color: #e8f1f5;
-    border-color: #294255;
+    background: var(--koc-surface);
+    color: var(--koc-text);
+    border-color: var(--koc-border);
   }
   [data-testid="stDataEditor"] [role="gridcell"]:hover,
   [data-testid="stDataFrame"] [role="gridcell"]:hover {
-    background: #163348;
+    background: var(--koc-primary-soft);
   }
   [data-testid="stPopoverBody"],
   [data-baseweb="modal"] {
-    background: #112334;
-    color: #e8f1f5;
+    background: var(--koc-surface);
+    color: var(--koc-text);
+  }
+  [data-testid="stFileUploaderDropzone"] {
+    background: var(--koc-surface);
+    border-color: var(--koc-border-strong);
+  }
+  [data-testid="stFileUploaderDropzone"]:hover {
+    background: var(--koc-surface-soft);
+    border-color: var(--koc-primary);
+  }
+  [data-testid="stRadio"] label,
+  [data-testid="stCheckbox"] label,
+  [data-testid="stToggle"] label {
+    color: var(--koc-text);
+  }
+  a {
+    color: var(--koc-primary-hover);
   }
 </style>
 """
