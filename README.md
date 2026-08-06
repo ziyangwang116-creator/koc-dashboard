@@ -216,6 +216,15 @@ PostgreSQL 初始化只负责创建表结构和空库默认数据，不会自动
 合同周期、主题申报和全部结算版本。未配置 `DATABASE_URL` 时，本地运行方式和
 SQLite 数据完全不变。
 
+首次迁移到空白 PostgreSQL/Supabase 项目时运行：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\migrate_sqlite_to_postgres.py --apply
+```
+
+迁移脚本默认拒绝写入已有业务数据的目标库。复制和逐表校验在同一个事务中
+完成，任何错误都会整体回滚。执行前仍应单独备份 `data/koc.db`。
+
 ## 达人库备份
 
 文件名：`KOC达人库_YYYYMMDD_HHMMSS.xlsx`
