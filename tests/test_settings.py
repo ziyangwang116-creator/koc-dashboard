@@ -7,6 +7,7 @@ def test_default_timezone_is_beijing_time():
 
 def test_youtube_key_and_tiktok_browser_settings_load_from_env_file(tmp_path, monkeypatch):
     for name in (
+        "DATABASE_URL",
         "YOUTUBE_API_KEY",
         "TIKTOK_PERSISTENT_HEADLESS",
     ):
@@ -26,6 +27,20 @@ def test_youtube_key_and_tiktok_browser_settings_load_from_env_file(tmp_path, mo
     assert settings.youtube_api_configured is True
     assert settings.tiktok_persistent_headless is True
     assert settings.tiktok_browser_data_dir.name == "tiktok_browser_data"
+
+
+def test_database_url_overrides_local_sqlite_path(tmp_path, monkeypatch):
+    database_url = "postgresql://postgres.example:secret@db.example.test/postgres"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    settings_file = tmp_path / "settings.json"
+    settings_file.write_text(
+        '{"database_path": "data/local.db"}',
+        encoding="utf-8",
+    )
+
+    settings = load_settings(settings_file, tmp_path / ".env")
+
+    assert settings.database_path == database_url
 
 
 def test_tiktok_browser_visibility_can_be_overridden_by_environment(tmp_path, monkeypatch):

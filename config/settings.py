@@ -14,7 +14,7 @@ ENV_FILE = PROJECT_ROOT / ".env"
 @dataclass(frozen=True)
 class Settings:
     timezone: str
-    database_path: Path
+    database_path: Path | str
     output_dir: Path
     youtube_api_key: str | None
     tiktok_browser_data_dir: Path
@@ -77,9 +77,14 @@ def load_settings(path: Path = SETTINGS_FILE, env_path: Path = ENV_FILE) -> Sett
 
     env_values = _read_local_env(env_path)
     youtube_api_key = _env_value("YOUTUBE_API_KEY", env_values) or None
+    database_url = _env_value("DATABASE_URL", env_values)
     return Settings(
         timezone=values.get("timezone", "Asia/Shanghai"),
-        database_path=_project_path(values.get("database_path", "data/koc.db")),
+        database_path=(
+            database_url
+            if database_url
+            else _project_path(values.get("database_path", "data/koc.db"))
+        ),
         output_dir=_project_path(values.get("output_dir", "data/output")),
         youtube_api_key=youtube_api_key,
         tiktok_browser_data_dir=_project_path(

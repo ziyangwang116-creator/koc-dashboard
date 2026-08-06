@@ -13,7 +13,7 @@ import pandas as pd
 
 from core.koc_import import KOCImportFormatError, normalize_import_columns
 from core.user_id import normalize_user_id
-from database.db import connect, init_db
+from database.db import INTEGRITY_ERRORS, connect, init_db, normalize_database_target
 from followers.base import FollowerFetchResult
 from models.enums import (
     ContractType,
@@ -75,7 +75,7 @@ def _utc_now() -> str:
 
 class KOCRepository:
     def __init__(self, database_path: Path | str) -> None:
-        self.database_path = Path(database_path)
+        self.database_path = normalize_database_target(database_path)
         init_db(self.database_path)
 
     @staticmethod
@@ -2279,7 +2279,7 @@ class KOCRepository:
                         error_code=None,
                         operator_mode=OperatorMode.MANUAL,
                     )
-            except sqlite3.IntegrityError as exc:
+            except INTEGRITY_ERRORS as exc:
                 raise KOCRepositoryError("达人保存失败，请检查输入内容。") from exc
         record = self.get(record_id)
         if record is None:
@@ -2548,7 +2548,7 @@ class KOCRepository:
                         error_code=None,
                         operator_mode=OperatorMode.MANUAL,
                     )
-            except sqlite3.IntegrityError as exc:
+            except INTEGRITY_ERRORS as exc:
                 raise KOCRepositoryError("达人修改失败，请检查输入内容。") from exc
         if reset_for_contract_change:
             self.create_contract_change(

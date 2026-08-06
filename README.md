@@ -198,6 +198,24 @@ TIKTOK_PERSISTENT_HEADLESS=false
 
 迁移幂等；重复启动不会重复复制或覆盖用户修改。
 
+### PostgreSQL / Supabase 后端
+
+默认仍使用 `config/settings.json` 中的本地 SQLite 路径。配置
+`DATABASE_URL` 后，应用会切换到 PostgreSQL，并自动创建与当前 SQLite
+版本对应的 21 张业务表和索引：
+
+```env
+DATABASE_URL=postgresql://USER:PASSWORD@HOST:PORT/postgres?sslmode=require
+```
+
+Supabase 建议使用项目 `Connect` 页面提供的 Pooler 连接串。应用连接池上限
+默认为 5，且关闭服务端预编译语句，兼容 Supabase transaction pooler。
+
+PostgreSQL 初始化只负责创建表结构和空库默认数据，不会自动复制本地
+`data/koc.db`。正式切换前必须使用独立迁移程序复制数据，并核对达人、投稿、
+合同周期、主题申报和全部结算版本。未配置 `DATABASE_URL` 时，本地运行方式和
+SQLite 数据完全不变。
+
 ## 达人库备份
 
 文件名：`KOC达人库_YYYYMMDD_HHMMSS.xlsx`

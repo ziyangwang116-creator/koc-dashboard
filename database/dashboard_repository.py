@@ -14,7 +14,7 @@ from core.cross_industry import (
     annotate_cross_industry_posts,
     normalize_video_url,
 )
-from database.db import connect, init_db
+from database.db import connect, init_db, normalize_database_target
 
 
 @dataclass(frozen=True)
@@ -45,7 +45,7 @@ class DashboardRepository:
     """Persist dashboard posts so they remain available after app restarts."""
 
     def __init__(self, database_path: Path | str) -> None:
-        self.database_path = Path(database_path)
+        self.database_path = normalize_database_target(database_path)
         init_db(self.database_path)
 
     @staticmethod
