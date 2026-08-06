@@ -171,6 +171,9 @@ def test_postgres_schema_covers_all_current_business_tables():
         "long_term_compensation_activity",
         "long_term_compensation_version",
         "schema_migrations",
+        "ai_conversation",
+        "ai_message",
+        "ai_tool_audit",
     }
 
     for table_name in expected_tables:

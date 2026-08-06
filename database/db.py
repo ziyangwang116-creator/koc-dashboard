@@ -72,6 +72,8 @@ def _postgres_row_factory(cursor: Any) -> Any:
 
 _POSTGRES_ID_TABLES = {
     "commentary_compensation_version",
+    "ai_message",
+    "ai_tool_audit",
     "commentary_theme_submission",
     "creator_contract",
     "creator_contract_period",

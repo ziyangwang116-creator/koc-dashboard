@@ -9,6 +9,7 @@ from ui.data_processing import render as render_data_processing
 from ui.compensation import render as render_compensation
 from ui.dashboard import DASHBOARD_CSS, render as render_dashboard
 from ui.koc_management import render as render_koc_management
+from ui.ai_assistant import render as render_ai_assistant
 
 
 st.set_page_config(page_title="KOC 数据整理工具", page_icon="📊", layout="wide")
@@ -24,10 +25,10 @@ with st.sidebar:
     st.header("KOC 数据整理工具")
     active_page = st.radio(
         "功能",
-        ["数据整理", "数据看板", "达人库管理", "报酬结算"],
+        ["数据整理", "数据看板", "达人库管理", "报酬结算", "AI 助手"],
         key="active_page",
     )
-    st.caption("V1.7 · 异业与流量加成联动")
+    st.caption("V2.0 · 数据看板与只读 AI 助手")
     database_label = (
         "Supabase PostgreSQL"
         if is_postgres_target(settings.database_path)
@@ -42,5 +43,7 @@ elif active_page == "数据看板":
     render_dashboard(settings)
 elif active_page == "达人库管理":
     render_koc_management(settings)
-else:
+elif active_page == "报酬结算":
     render_compensation(settings)
+else:
+    render_ai_assistant(settings)

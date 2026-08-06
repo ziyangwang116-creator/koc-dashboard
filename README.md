@@ -202,11 +202,13 @@ TIKTOK_PERSISTENT_HEADLESS=false
 
 默认仍使用 `config/settings.json` 中的本地 SQLite 路径。配置
 `DATABASE_URL` 后，应用会切换到 PostgreSQL，并自动创建与当前 SQLite
-版本对应的 21 张业务表和索引：
+版本对应的业务表和索引：
 
 ```env
 DATABASE_URL=postgresql://USER:PASSWORD@HOST:PORT/postgres?sslmode=require
 TEAM_PASSWORD=replace-with-a-strong-shared-password
+OPENAI_API_KEY=replace-with-your-openai-api-key
+OPENAI_MODEL=gpt-5.6-sol
 ```
 
 Supabase 建议使用项目 `Connect` 页面提供的 Pooler 连接串。应用连接池上限
@@ -219,8 +221,19 @@ SQLite 数据完全不变。
 
 配置 `TEAM_PASSWORD` 后，应用会先显示团队密码登录页。认证结果只保存在当前
 浏览器会话中，侧边栏提供“退出登录”按钮。Streamlit Community Cloud 部署时，
-在应用的 Secrets 设置中添加同名的 `DATABASE_URL` 和 `TEAM_PASSWORD`，不要把
+在应用的 Secrets 设置中添加同名的 `DATABASE_URL`、`TEAM_PASSWORD`、
+`OPENAI_API_KEY` 和 `OPENAI_MODEL`，不要把
 真实密码提交到 GitHub。
+
+## AI 助手
+
+侧边栏的“AI 助手”是只读 Agent。它通过 OpenAI Responses API 调用受控工具，
+可查询达人资料、合同历史、月度表现、月份对比、Top 视频、月度数据审计和已保存
+的结算版本。它不能执行任意 SQL，也不能修改达人库、投稿、合同或结算数据。
+
+AI 对话、消息和工具审计分别保存在 `ai_conversation`、`ai_message` 和
+`ai_tool_audit`。工具审计只保存经过清理的参数、结果摘要、耗时和状态，不保存
+API Key 或数据库连接串；对话默认保留 30 天。
 
 首次迁移到空白 PostgreSQL/Supabase 项目时运行：
 

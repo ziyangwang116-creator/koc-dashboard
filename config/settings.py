@@ -20,6 +20,8 @@ class Settings:
     tiktok_browser_data_dir: Path
     tiktok_persistent_headless: bool
     team_password: str | None = field(default=None, repr=False)
+    openai_api_key: str | None = field(default=None, repr=False)
+    openai_model: str = "gpt-5.6-sol"
 
     @property
     def youtube_api_configured(self) -> bool:
@@ -28,6 +30,10 @@ class Settings:
     @property
     def team_password_configured(self) -> bool:
         return bool(self.team_password)
+
+    @property
+    def openai_configured(self) -> bool:
+        return bool(self.openai_api_key and self.openai_model)
 
 def _project_path(value: str) -> Path:
     path = Path(value)
@@ -101,6 +107,8 @@ def load_settings(path: Path = SETTINGS_FILE, env_path: Path = ENV_FILE) -> Sett
     youtube_api_key = _env_value("YOUTUBE_API_KEY", env_values) or None
     database_url = _env_value("DATABASE_URL", env_values)
     team_password = _env_value("TEAM_PASSWORD", env_values) or None
+    openai_api_key = _env_value("OPENAI_API_KEY", env_values) or None
+    openai_model = _env_value("OPENAI_MODEL", env_values, "gpt-5.6-sol")
     return Settings(
         timezone=values.get("timezone", "Asia/Shanghai"),
         database_path=(
@@ -117,4 +125,6 @@ def load_settings(path: Path = SETTINGS_FILE, env_path: Path = ENV_FILE) -> Sett
             "TIKTOK_PERSISTENT_HEADLESS", env_values, False
         ),
         team_password=team_password,
+        openai_api_key=openai_api_key,
+        openai_model=openai_model,
     )

@@ -12,6 +12,7 @@ from core.transformer import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LOCAL_PACKAGES = {
+    "ai",
     "config",
     "core",
     "database",
@@ -25,7 +26,7 @@ LOCAL_PACKAGES = {
 
 def test_transformer_public_interface_is_importable():
     assert issubclass(DataTransformError, ValueError)
-    assert TRANSFORM_RULE_VERSION == "2.0.0"
+    assert TRANSFORM_RULE_VERSION == "2.1.0"
     assert TransformResult.__name__ == "TransformResult"
     assert callable(transform_data)
 

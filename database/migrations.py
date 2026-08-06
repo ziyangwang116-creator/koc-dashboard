@@ -55,6 +55,7 @@ AUTHORITATIVE_CONTRACT_PERIODS_MIGRATION_ID = (
     "v1.9_authoritative_contract_periods"
 )
 CONTRACT_REVISION_AUDIT_MIGRATION_ID = "v2.0_contract_revision_audit"
+AI_AGENT_STORAGE_MIGRATION_ID = "v2.1_ai_agent_storage"
 FOLLOWER_AUDIT_COLUMNS = (
     "id",
     "user_id",
@@ -736,6 +737,64 @@ def _create_traffic_boost_settings(connection: sqlite3.Connection) -> None:
     )
 
 
+def _create_ai_agent_storage(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_conversation (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            title TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            expires_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_message (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id TEXT NOT NULL,
+            role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+            content TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (conversation_id) REFERENCES ai_conversation(id)
+                ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_tool_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id TEXT,
+            tool_name TEXT NOT NULL,
+            arguments_json TEXT NOT NULL,
+            result_summary_json TEXT NOT NULL,
+            duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
+            status TEXT NOT NULL CHECK (status IN ('SUCCESS', 'ERROR')),
+            error_code TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (conversation_id) REFERENCES ai_conversation(id)
+                ON DELETE SET NULL
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ai_conversation_session "
+        "ON ai_conversation(session_id, updated_at DESC)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ai_message_conversation "
+        "ON ai_message(conversation_id, id)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ai_tool_audit_conversation "
+        "ON ai_tool_audit(conversation_id, id DESC)"
+    )
+
+
 def _create_grassroot_compensation_versions(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
@@ -1274,6 +1333,8 @@ def apply_migrations(
         )
     _create_contract_revision_audit(connection)
     _record_migration(connection, CONTRACT_REVISION_AUDIT_MIGRATION_ID)
+    _create_ai_agent_storage(connection)
+    _record_migration(connection, AI_AGENT_STORAGE_MIGRATION_ID)
 
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_koc_master_user_id ON koc_master(user_id)"

@@ -12,6 +12,8 @@ def test_youtube_key_and_tiktok_browser_settings_load_from_env_file(tmp_path, mo
         "TEAM_PASSWORD",
         "YOUTUBE_API_KEY",
         "TIKTOK_PERSISTENT_HEADLESS",
+        "OPENAI_API_KEY",
+        "OPENAI_MODEL",
     ):
         monkeypatch.delenv(name, raising=False)
     settings_file = tmp_path / "settings.json"
@@ -20,7 +22,9 @@ def test_youtube_key_and_tiktok_browser_settings_load_from_env_file(tmp_path, mo
     env_file.write_text(
         "YOUTUBE_API_KEY=test-only-key\n"
         "TEAM_PASSWORD=test-team-password\n"
-        "TIKTOK_PERSISTENT_HEADLESS=true\n",
+        "TIKTOK_PERSISTENT_HEADLESS=true\n"
+        "OPENAI_API_KEY=test-openai-key\n"
+        "OPENAI_MODEL=test-model\n",
         encoding="utf-8",
     )
 
@@ -31,6 +35,9 @@ def test_youtube_key_and_tiktok_browser_settings_load_from_env_file(tmp_path, mo
     assert settings.team_password == "test-team-password"
     assert settings.team_password_configured is True
     assert settings.tiktok_persistent_headless is True
+    assert settings.openai_api_key == "test-openai-key"
+    assert settings.openai_model == "test-model"
+    assert settings.openai_configured is True
     assert settings.tiktok_browser_data_dir.name == "tiktok_browser_data"
 
 
@@ -50,24 +57,34 @@ def test_database_url_overrides_local_sqlite_path(tmp_path, monkeypatch):
 
 def test_team_password_is_not_exposed_in_settings_repr(tmp_path, monkeypatch):
     monkeypatch.setenv("TEAM_PASSWORD", "private-team-password")
+    monkeypatch.setenv("OPENAI_API_KEY", "private-openai-key")
     settings_file = tmp_path / "settings.json"
     settings_file.write_text("{}", encoding="utf-8")
 
     settings = load_settings(settings_file, tmp_path / ".env")
 
     assert "private-team-password" not in repr(settings)
+    assert "private-openai-key" not in repr(settings)
 
 
 def test_streamlit_secrets_are_used_when_environment_and_env_file_are_empty(
     tmp_path,
     monkeypatch,
 ):
-    for name in ("DATABASE_URL", "TEAM_PASSWORD", "YOUTUBE_API_KEY"):
+    for name in (
+        "DATABASE_URL",
+        "TEAM_PASSWORD",
+        "YOUTUBE_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENAI_MODEL",
+    ):
         monkeypatch.delenv(name, raising=False)
     secret_values = {
         "DATABASE_URL": "postgresql://cloud.example.test/postgres",
         "TEAM_PASSWORD": "cloud-team-password",
         "YOUTUBE_API_KEY": "cloud-youtube-key",
+        "OPENAI_API_KEY": "cloud-openai-key",
+        "OPENAI_MODEL": "cloud-model",
     }
     monkeypatch.setattr(
         settings_module,
@@ -82,6 +99,8 @@ def test_streamlit_secrets_are_used_when_environment_and_env_file_are_empty(
     assert settings.database_path == secret_values["DATABASE_URL"]
     assert settings.team_password == secret_values["TEAM_PASSWORD"]
     assert settings.youtube_api_key == secret_values["YOUTUBE_API_KEY"]
+    assert settings.openai_api_key == secret_values["OPENAI_API_KEY"]
+    assert settings.openai_model == secret_values["OPENAI_MODEL"]
 
 
 def test_tiktok_browser_visibility_can_be_overridden_by_environment(tmp_path, monkeypatch):

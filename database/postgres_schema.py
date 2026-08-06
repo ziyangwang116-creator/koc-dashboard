@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from typing import Any
 
 
-POSTGRES_SCHEMA_MIGRATION_ID = "postgres_v1_initial_schema"
+POSTGRES_SCHEMA_MIGRATION_ID = "postgres_v2_ai_agent"
 
 
 POSTGRES_SCHEMA_STATEMENTS = (
@@ -334,6 +334,40 @@ POSTGRES_SCHEMA_STATEMENTS = (
         UNIQUE (period_month, version_no)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS ai_conversation (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        title TEXT,
+        created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+        updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+        expires_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS ai_message (
+        id BIGSERIAL PRIMARY KEY,
+        conversation_id TEXT NOT NULL REFERENCES ai_conversation(id)
+            ON DELETE CASCADE,
+        role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+        content TEXT NOT NULL,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS ai_tool_audit (
+        id BIGSERIAL PRIMARY KEY,
+        conversation_id TEXT REFERENCES ai_conversation(id) ON DELETE SET NULL,
+        tool_name TEXT NOT NULL,
+        arguments_json TEXT NOT NULL,
+        result_summary_json TEXT NOT NULL,
+        duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
+        status TEXT NOT NULL CHECK (status IN ('SUCCESS', 'ERROR')),
+        error_code TEXT,
+        created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)
+    )
+    """,
 )
 
 
@@ -359,6 +393,9 @@ POSTGRES_INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_commentary_validity_period_creator ON commentary_post_validity(period_month, creator_id)",
     "CREATE INDEX IF NOT EXISTS idx_commentary_theme_submission_period ON commentary_theme_submission(period_month, creator_id)",
     "CREATE INDEX IF NOT EXISTS idx_commentary_compensation_version_period ON commentary_compensation_version(period_month, version_no DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_ai_conversation_session ON ai_conversation(session_id, updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_ai_message_conversation ON ai_message(conversation_id, id)",
+    "CREATE INDEX IF NOT EXISTS idx_ai_tool_audit_conversation ON ai_tool_audit(conversation_id, id DESC)",
 )
 
 
