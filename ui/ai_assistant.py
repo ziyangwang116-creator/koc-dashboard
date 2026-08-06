@@ -39,12 +39,18 @@ def render(settings: Settings) -> None:
         use_container_width=True,
         on_click=_new_conversation,
     )
-    toolbar[1].caption(f"模型 · {settings.openai_model}")
+    provider_label = "DeepSeek" if settings.ai_provider == "deepseek" else "OpenAI"
+    toolbar[1].caption(f"{provider_label} · {settings.ai_model}")
 
-    if not settings.openai_configured:
+    if not settings.ai_configured:
+        key_name = (
+            "DEEPSEEK_API_KEY"
+            if settings.ai_provider == "deepseek"
+            else "OPENAI_API_KEY"
+        )
         st.warning(
             "AI 服务尚未配置。请在本地 .env 或 Streamlit Secrets 中设置 "
-            "OPENAI_API_KEY，并保留或设置 OPENAI_MODEL。"
+            f"{key_name}。"
         )
 
     for message in st.session_state.ai_chat_messages:
@@ -53,7 +59,7 @@ def render(settings: Settings) -> None:
 
     prompt = st.chat_input(
         "查询达人、播放量、合同或结算数据",
-        disabled=not settings.openai_configured,
+        disabled=not settings.ai_configured,
     )
     if not prompt:
         return
@@ -67,8 +73,10 @@ def render(settings: Settings) -> None:
             with st.spinner("正在核对数据库..."):
                 service = AIAgentService(
                     settings.database_path,
-                    api_key=settings.openai_api_key,
-                    model=settings.openai_model,
+                    api_key=settings.ai_api_key,
+                    model=settings.ai_model,
+                    provider=settings.ai_provider,
+                    base_url=settings.ai_base_url,
                 )
                 response = service.ask(
                     conversation_id=st.session_state.ai_conversation_id,

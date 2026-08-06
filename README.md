@@ -207,6 +207,10 @@ TIKTOK_PERSISTENT_HEADLESS=false
 ```env
 DATABASE_URL=postgresql://USER:PASSWORD@HOST:PORT/postgres?sslmode=require
 TEAM_PASSWORD=replace-with-a-strong-shared-password
+AI_PROVIDER=deepseek
+DEEPSEEK_API_KEY=replace-with-your-deepseek-api-key
+DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_BASE_URL=https://api.deepseek.com
 OPENAI_API_KEY=replace-with-your-openai-api-key
 OPENAI_MODEL=gpt-5.6-sol
 ```
@@ -222,14 +226,20 @@ SQLite 数据完全不变。
 配置 `TEAM_PASSWORD` 后，应用会先显示团队密码登录页。认证结果只保存在当前
 浏览器会话中，侧边栏提供“退出登录”按钮。Streamlit Community Cloud 部署时，
 在应用的 Secrets 设置中添加同名的 `DATABASE_URL`、`TEAM_PASSWORD`、
-`OPENAI_API_KEY` 和 `OPENAI_MODEL`，不要把
+`AI_PROVIDER`、当前供应商的 API Key 和模型配置，不要把
 真实密码提交到 GitHub。
 
 ## AI 助手
 
-侧边栏的“AI 助手”是只读 Agent。它通过 OpenAI Responses API 调用受控工具，
+侧边栏的“AI 助手”是只读 Agent。默认通过 DeepSeek 的 OpenAI 兼容
+Responses API 调用受控工具，
 可查询达人资料、合同历史、月度表现、月份对比、Top 视频、月度数据审计和已保存
 的结算版本。它不能执行任意 SQL，也不能修改达人库、投稿、合同或结算数据。
+
+DeepSeek 使用 `https://api.deepseek.com`，默认模型为
+`deepseek-v4-flash`。当前 DeepSeek Responses API 是无状态接口，因此应用会显式
+回传必要的对话与工具调用结果。将 `AI_PROVIDER` 改为 `openai` 后，可继续使用
+`OPENAI_API_KEY` 和 `OPENAI_MODEL` 作为备用通道。
 
 AI 对话、消息和工具审计分别保存在 `ai_conversation`、`ai_message` 和
 `ai_tool_audit`。工具审计只保存经过清理的参数、结果摘要、耗时和状态，不保存

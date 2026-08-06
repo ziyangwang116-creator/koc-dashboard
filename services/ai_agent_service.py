@@ -33,6 +33,29 @@ def _item_value(item: Any, name: str, default: Any = None) -> Any:
     return getattr(item, name, default)
 
 
+def _output_item_payload(item: Any) -> dict[str, Any]:
+    if isinstance(item, dict):
+        return item
+    model_dump = getattr(item, "model_dump", None)
+    if callable(model_dump):
+        return model_dump(mode="json", exclude_none=True)
+    payload = {}
+    for name in (
+        "type",
+        "id",
+        "status",
+        "role",
+        "content",
+        "call_id",
+        "name",
+        "arguments",
+    ):
+        value = getattr(item, name, None)
+        if value is not None:
+            payload[name] = value
+    return payload
+
+
 def _result_summary(result: dict[str, Any]) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "status": result.get("status", "ok"),
@@ -62,21 +85,34 @@ class AIAgentService:
         *,
         api_key: str | None,
         model: str,
+        provider: str = "openai",
+        base_url: str | None = None,
         client: Any | None = None,
     ) -> None:
         self.repository = AIRepository(database_path)
         self.tools = AIToolRegistry(database_path)
+        self.provider = str(provider).strip().casefold()
+        if self.provider not in {"deepseek", "openai"}:
+            raise AIAgentServiceError("AI provider 必须是 deepseek 或 openai。")
         self.model = str(model).strip()
         if not self.model:
-            raise AIAgentServiceError("OPENAI_MODEL 未配置。")
+            raise AIAgentServiceError("AI 模型未配置。")
         if client is not None:
             self.client = client
         else:
             if not api_key:
-                raise AIAgentServiceError("OPENAI_API_KEY 未配置。")
+                key_name = (
+                    "DEEPSEEK_API_KEY"
+                    if self.provider == "deepseek"
+                    else "OPENAI_API_KEY"
+                )
+                raise AIAgentServiceError(f"{key_name} 未配置。")
             if OpenAI is None:
                 raise AIAgentServiceError("缺少 openai Python 依赖。")
-            self.client = OpenAI(api_key=api_key)
+            client_options: dict[str, Any] = {"api_key": api_key}
+            if base_url:
+                client_options["base_url"] = base_url
+            self.client = OpenAI(**client_options)
 
     def _execute_tool(
         self,
@@ -170,6 +206,10 @@ class AIAgentService:
                 ]
                 if not function_calls:
                     break
+                inputs.extend(
+                    _output_item_payload(item)
+                    for item in (_item_value(response, "output", []) or [])
+                )
                 outputs = []
                 for call in function_calls:
                     result, audit = self._execute_tool(
@@ -185,11 +225,11 @@ class AIAgentService:
                             "output": json.dumps(result, ensure_ascii=False, default=str),
                         }
                     )
+                inputs.extend(outputs)
                 response = self.client.responses.create(
                     model=self.model,
                     instructions=SYSTEM_PROMPT,
-                    previous_response_id=str(_item_value(response, "id", "")),
-                    input=outputs,
+                    input=inputs,
                     tools=OPENAI_TOOLS,
                 )
             else:
@@ -203,7 +243,17 @@ class AIAgentService:
         except AIAgentServiceError:
             raise
         except Exception as exc:
-            raise AIAgentServiceError(f"AI 请求失败：{exc}") from exc
+            status_code = getattr(exc, "status_code", None)
+            provider_label = "DeepSeek" if self.provider == "deepseek" else "OpenAI"
+            if status_code == 401:
+                message = f"{provider_label} API Key 无效，请更新云端 Secrets 后重启。"
+            elif status_code == 402:
+                message = f"{provider_label} API 账户余额不足。"
+            elif status_code == 429:
+                message = f"{provider_label} API 请求过于频繁，请稍后重试。"
+            else:
+                message = f"{provider_label} AI 请求失败：{exc}"
+            raise AIAgentServiceError(message) from exc
 
         answer = str(_item_value(response, "output_text", "")).strip()
         if not answer:
@@ -212,6 +262,10 @@ class AIAgentService:
             conversation_id,
             "assistant",
             answer,
-            metadata={"model": self.model, "tool_calls": len(tool_audits)},
+            metadata={
+                "provider": self.provider,
+                "model": self.model,
+                "tool_calls": len(tool_audits),
+            },
         )
         return AIAgentResponse(answer=answer, tool_calls=tuple(tool_audits))

@@ -20,6 +20,10 @@ class Settings:
     tiktok_browser_data_dir: Path
     tiktok_persistent_headless: bool
     team_password: str | None = field(default=None, repr=False)
+    ai_provider: str = "deepseek"
+    deepseek_api_key: str | None = field(default=None, repr=False)
+    deepseek_model: str = "deepseek-v4-flash"
+    deepseek_base_url: str = "https://api.deepseek.com"
     openai_api_key: str | None = field(default=None, repr=False)
     openai_model: str = "gpt-5.6-sol"
 
@@ -34,6 +38,30 @@ class Settings:
     @property
     def openai_configured(self) -> bool:
         return bool(self.openai_api_key and self.openai_model)
+
+    @property
+    def ai_api_key(self) -> str | None:
+        return (
+            self.deepseek_api_key
+            if self.ai_provider == "deepseek"
+            else self.openai_api_key
+        )
+
+    @property
+    def ai_model(self) -> str:
+        return (
+            self.deepseek_model
+            if self.ai_provider == "deepseek"
+            else self.openai_model
+        )
+
+    @property
+    def ai_base_url(self) -> str | None:
+        return self.deepseek_base_url if self.ai_provider == "deepseek" else None
+
+    @property
+    def ai_configured(self) -> bool:
+        return bool(self.ai_api_key and self.ai_model)
 
 def _project_path(value: str) -> Path:
     path = Path(value)
@@ -107,6 +135,16 @@ def load_settings(path: Path = SETTINGS_FILE, env_path: Path = ENV_FILE) -> Sett
     youtube_api_key = _env_value("YOUTUBE_API_KEY", env_values) or None
     database_url = _env_value("DATABASE_URL", env_values)
     team_password = _env_value("TEAM_PASSWORD", env_values) or None
+    ai_provider = _env_value("AI_PROVIDER", env_values, "deepseek").casefold()
+    if ai_provider not in {"deepseek", "openai"}:
+        raise ValueError("AI_PROVIDER 必须是 deepseek 或 openai。")
+    deepseek_api_key = _env_value("DEEPSEEK_API_KEY", env_values) or None
+    deepseek_model = _env_value(
+        "DEEPSEEK_MODEL", env_values, "deepseek-v4-flash"
+    )
+    deepseek_base_url = _env_value(
+        "DEEPSEEK_BASE_URL", env_values, "https://api.deepseek.com"
+    ).rstrip("/")
     openai_api_key = _env_value("OPENAI_API_KEY", env_values) or None
     openai_model = _env_value("OPENAI_MODEL", env_values, "gpt-5.6-sol")
     return Settings(
@@ -125,6 +163,10 @@ def load_settings(path: Path = SETTINGS_FILE, env_path: Path = ENV_FILE) -> Sett
             "TIKTOK_PERSISTENT_HEADLESS", env_values, False
         ),
         team_password=team_password,
+        ai_provider=ai_provider,
+        deepseek_api_key=deepseek_api_key,
+        deepseek_model=deepseek_model,
+        deepseek_base_url=deepseek_base_url,
         openai_api_key=openai_api_key,
         openai_model=openai_model,
     )

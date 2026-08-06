@@ -192,6 +192,8 @@ def test_agent_service_executes_tools_and_writes_sanitized_audit(tmp_path):
         database_path,
         api_key=None,
         model="test-model",
+        provider="deepseek",
+        base_url="https://api.deepseek.com",
         client=client,
     )
 
@@ -203,7 +205,10 @@ def test_agent_service_executes_tools_and_writes_sanitized_audit(tmp_path):
 
     assert response.answer == "AI测试达人当前在达人库中。"
     assert response.tool_calls[0]["tool_name"] == "search_creators"
-    assert fake_responses.calls[1]["previous_response_id"] == "response-1"
+    assert "previous_response_id" not in fake_responses.calls[1]
+    second_input = fake_responses.calls[1]["input"]
+    assert any(item.get("type") == "function_call" for item in second_input)
+    assert any(item.get("type") == "function_call_output" for item in second_input)
     with connect(database_path) as connection:
         audit = connection.execute(
             "SELECT tool_name, status, arguments_json FROM ai_tool_audit"

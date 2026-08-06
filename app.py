@@ -28,7 +28,7 @@ with st.sidebar:
         ["数据整理", "数据看板", "达人库管理", "报酬结算", "AI 助手"],
         key="active_page",
     )
-    st.caption("V2.0 · 数据看板与只读 AI 助手")
+    st.caption("V2.1 · DeepSeek 只读 AI 助手")
     database_label = (
         "Supabase PostgreSQL"
         if is_postgres_target(settings.database_path)
