@@ -51,8 +51,25 @@ def _read_local_env(path: Path) -> dict[str, str]:
     return values
 
 
+def _streamlit_secret_value(name: str) -> str:
+    try:
+        import streamlit as st
+
+        value = st.secrets.get(name, "")
+    except Exception:
+        return ""
+    return str(value).strip() if value is not None else ""
+
+
 def _env_value(name: str, file_values: dict[str, str], default: str = "") -> str:
-    return os.environ.get(name, file_values.get(name, default)).strip()
+    environment_value = os.environ.get(name, "").strip()
+    if environment_value:
+        return environment_value
+    file_value = file_values.get(name, "").strip()
+    if file_value:
+        return file_value
+    secret_value = _streamlit_secret_value(name)
+    return secret_value or default.strip()
 
 
 def _env_bool(name: str, file_values: dict[str, str], default: bool) -> bool:

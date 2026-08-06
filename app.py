@@ -3,7 +3,7 @@ from __future__ import annotations
 import streamlit as st
 
 from config.settings import load_settings
-from database.db import init_db
+from database.db import init_db, is_postgres_target
 from ui.auth import render_logout, require_team_authentication
 from ui.data_processing import render as render_data_processing
 from ui.compensation import render as render_compensation
@@ -28,6 +28,12 @@ with st.sidebar:
         key="active_page",
     )
     st.caption("V1.7 · 异业与流量加成联动")
+    database_label = (
+        "Supabase PostgreSQL"
+        if is_postgres_target(settings.database_path)
+        else "本地 SQLite"
+    )
+    st.caption(f"数据库 · {database_label} 已连接")
     render_logout(settings.team_password)
 
 if active_page == "数据整理":

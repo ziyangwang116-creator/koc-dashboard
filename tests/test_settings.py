@@ -1,3 +1,4 @@
+import config.settings as settings_module
 from config.settings import load_settings
 
 
@@ -55,6 +56,32 @@ def test_team_password_is_not_exposed_in_settings_repr(tmp_path, monkeypatch):
     settings = load_settings(settings_file, tmp_path / ".env")
 
     assert "private-team-password" not in repr(settings)
+
+
+def test_streamlit_secrets_are_used_when_environment_and_env_file_are_empty(
+    tmp_path,
+    monkeypatch,
+):
+    for name in ("DATABASE_URL", "TEAM_PASSWORD", "YOUTUBE_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    secret_values = {
+        "DATABASE_URL": "postgresql://cloud.example.test/postgres",
+        "TEAM_PASSWORD": "cloud-team-password",
+        "YOUTUBE_API_KEY": "cloud-youtube-key",
+    }
+    monkeypatch.setattr(
+        settings_module,
+        "_streamlit_secret_value",
+        lambda name: secret_values.get(name, ""),
+    )
+    settings_file = tmp_path / "settings.json"
+    settings_file.write_text("{}", encoding="utf-8")
+
+    settings = load_settings(settings_file, tmp_path / ".env")
+
+    assert settings.database_path == secret_values["DATABASE_URL"]
+    assert settings.team_password == secret_values["TEAM_PASSWORD"]
+    assert settings.youtube_api_key == secret_values["YOUTUBE_API_KEY"]
 
 
 def test_tiktok_browser_visibility_can_be_overridden_by_environment(tmp_path, monkeypatch):
