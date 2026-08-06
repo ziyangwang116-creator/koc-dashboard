@@ -1,0 +1,91 @@
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SETTINGS_FILE = Path(__file__).with_name("settings.json")
+ENV_FILE = PROJECT_ROOT / ".env"
+
+
+@dataclass(frozen=True)
+class Settings:
+    timezone: str
+    database_path: Path
+    output_dir: Path
+    youtube_api_key: str | None
+    tiktok_browser_data_dir: Path
+    tiktok_persistent_headless: bool
+
+    @property
+    def youtube_api_configured(self) -> bool:
+        return bool(self.youtube_api_key)
+
+def _project_path(value: str) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def _read_local_env(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    values: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, raw_value = line.split("=", 1)
+        key = key.strip()
+        value = raw_value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def _env_value(name: str, file_values: dict[str, str], default: str = "") -> str:
+    return os.environ.get(name, file_values.get(name, default)).strip()
+
+
+def _env_bool(name: str, file_values: dict[str, str], default: bool) -> bool:
+    raw = _env_value(name, file_values, "true" if default else "false").casefold()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} 必须是 true 或 false。")
+
+
+def _env_float(
+    name: str,
+    file_values: dict[str, str],
+    default: float,
+) -> float:
+    raw = _env_value(name, file_values, str(default))
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} 必须是数字。") from exc
+
+
+def load_settings(path: Path = SETTINGS_FILE, env_path: Path = ENV_FILE) -> Settings:
+    with path.open("r", encoding="utf-8") as file:
+        values = json.load(file)
+
+    env_values = _read_local_env(env_path)
+    youtube_api_key = _env_value("YOUTUBE_API_KEY", env_values) or None
+    return Settings(
+        timezone=values.get("timezone", "Asia/Shanghai"),
+        database_path=_project_path(values.get("database_path", "data/koc.db")),
+        output_dir=_project_path(values.get("output_dir", "data/output")),
+        youtube_api_key=youtube_api_key,
+        tiktok_browser_data_dir=_project_path(
+            values.get("tiktok_browser_data_dir", "data/tiktok_browser_data")
+        ),
+        tiktok_persistent_headless=_env_bool(
+            "TIKTOK_PERSISTENT_HEADLESS", env_values, False
+        ),
+    )
