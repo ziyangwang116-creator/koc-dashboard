@@ -76,6 +76,30 @@ def _result_summary(result: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
+def _exception_status_code(exc: Exception) -> int | None:
+    """Extract an HTTP status from wrapped SDK and transport exceptions."""
+    current: BaseException | None = exc
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        status_code = getattr(current, "status_code", None)
+        if isinstance(status_code, int):
+            return status_code
+        response = getattr(current, "response", None)
+        response_status = getattr(response, "status_code", None)
+        if isinstance(response_status, int):
+            return response_status
+        message = str(current).casefold()
+        if "429" in message or "too many requests" in message:
+            return 429
+        if "402" in message or "insufficient balance" in message:
+            return 402
+        if "401" in message or "invalid api key" in message:
+            return 401
+        current = current.__cause__ or current.__context__
+    return None
+
+
 class AIAgentService:
     MAX_TOOL_ROUNDS = 6
 
@@ -109,7 +133,11 @@ class AIAgentService:
                 raise AIAgentServiceError(f"{key_name} 未配置。")
             if OpenAI is None:
                 raise AIAgentServiceError("缺少 openai Python 依赖。")
-            client_options: dict[str, Any] = {"api_key": api_key}
+            client_options: dict[str, Any] = {
+                "api_key": api_key,
+                "max_retries": 0,
+                "timeout": 45.0,
+            }
             if base_url:
                 client_options["base_url"] = base_url
             self.client = OpenAI(**client_options)
@@ -243,14 +271,17 @@ class AIAgentService:
         except AIAgentServiceError:
             raise
         except Exception as exc:
-            status_code = getattr(exc, "status_code", None)
+            status_code = _exception_status_code(exc)
             provider_label = "DeepSeek" if self.provider == "deepseek" else "OpenAI"
             if status_code == 401:
                 message = f"{provider_label} API Key 无效，请更新云端 Secrets 后重启。"
             elif status_code == 402:
                 message = f"{provider_label} API 账户余额不足。"
             elif status_code == 429:
-                message = f"{provider_label} API 请求过于频繁，请稍后重试。"
+                message = (
+                    f"{provider_label} API 当前限流（429）。请等待 30-60 秒后重试；"
+                    "若持续出现，请检查账户余额以及并发、RPM/QPM 限制。"
+                )
             else:
                 message = f"{provider_label} AI 请求失败：{exc}"
             raise AIAgentServiceError(message) from exc

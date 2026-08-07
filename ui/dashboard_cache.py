@@ -37,21 +37,26 @@ def dashboard_cache_token(database_path: Path | str) -> DatabaseCacheToken:
         tracked_tables = (
             ("dashboard_post", "updated_at"),
             ("koc_master", "updated_at"),
+            ("creator_contract", "updated_at"),
             ("creator_profile_history", "updated_at"),
             ("creator_contract_period", "updated_at"),
             ("dashboard_cross_industry_exclusion", "updated_at"),
             ("dashboard_traffic_boost_setting", "updated_at"),
         )
+        revision_query = " UNION ALL ".join(
+            f"SELECT '{table_name}' AS table_name, COUNT(*) AS row_count, "
+            f"COALESCE(MAX({timestamp_column}), '') AS latest_update "
+            f"FROM {table_name}"
+            for table_name, timestamp_column in tracked_tables
+        )
         with connect(database_path) as connection:
-            for table_name, timestamp_column in tracked_tables:
-                row = connection.execute(
-                    f"SELECT COUNT(*), COALESCE(MAX({timestamp_column}), '') "
-                    f"FROM {table_name}"
-                ).fetchone()
-                count = int(row[0]) if row is not None else 0
-                timestamp = str(row[1]) if row is not None else ""
-                total_count += count
-                digest.update(f"{table_name}:{count}:{timestamp}".encode("utf-8"))
+            rows = connection.execute(revision_query).fetchall()
+        for row in rows:
+            table_name = str(row[0])
+            count = int(row[1])
+            timestamp = str(row[2])
+            total_count += count
+            digest.update(f"{table_name}:{count}:{timestamp}".encode("utf-8"))
         target_hash = hashlib.sha256(str(database_path).encode("utf-8")).hexdigest()[:16]
         revision = int.from_bytes(digest.digest()[:8], "big", signed=False)
         return ((f"postgres:{target_hash}", total_count, revision),)

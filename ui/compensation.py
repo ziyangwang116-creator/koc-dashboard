@@ -6,12 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from config.settings import Settings
-from core.dashboard_bootstrap import ensure_dashboard_seeded
-from core.dashboard_processor import (
-    build_dashboard_result,
-    enrich_dashboard_creator_metadata,
-    filter_dashboard_data,
-)
+from core.dashboard_processor import filter_dashboard_data
 from core.cross_industry import (
     cross_industry_totals,
     exclude_cross_industry_posts,
@@ -38,6 +33,11 @@ from models.enums import CreatorCategory
 from models.koc import KOCRecord
 from services.follower_service import FollowerService
 from ui.dashboard import DASHBOARD_CSS
+from ui.dashboard_cache import (
+    dashboard_cache_token,
+    ensure_dashboard_seeded_once,
+    load_prepared_dashboard_data,
+)
 
 
 def _month_end(value: date) -> date:
@@ -1581,22 +1581,25 @@ def render(settings: Settings) -> None:
     st.markdown(DASHBOARD_CSS, unsafe_allow_html=True)
     dashboard_repository = DashboardRepository(settings.database_path)
     creator_repository = KOCRepository(settings.database_path)
-    ensure_dashboard_seeded(settings.database_path, settings.timezone)
+    ensure_dashboard_seeded_once(settings.database_path, settings.timezone)
     creator_sync_notice = st.session_state.pop(
         "compensation_creator_sync_notice",
         None,
     )
     if creator_sync_notice:
         st.success(str(creator_sync_notice))
-    creator_records = creator_repository.list(include_inactive=True)
-    profile_history = creator_repository.list_profile_history()
-    loaded = build_dashboard_result(dashboard_repository.load_posts())
-    data = enrich_dashboard_creator_metadata(
-        loaded.data,
+    database_state = dashboard_cache_token(settings.database_path)
+    (
+        data,
+        _file_reports,
+        _unmatched_uids,
         creator_records,
-        profile_history,
+        _profile_history,
+    ) = load_prepared_dashboard_data(
+        str(settings.database_path),
+        database_state,
+        include_inactive=True,
     )
-    data = dashboard_repository.annotate_cross_industry_posts(data)
     st.markdown(
         '<div class="dashboard-kicker">Identity V · Japan KOC campaign</div>',
         unsafe_allow_html=True,
@@ -1614,10 +1617,14 @@ def render(settings: Settings) -> None:
         f"薪酬口径固定排除异业视频：{excluded_count:,} 条，"
         f"{excluded_views:,} 播放；已锁定版本保持冻结。"
     )
-    grassroot_tab, long_term_tab, commentary_tab = st.tabs(
-        ["草根达人结算", "长包达人结算", "解说达人结算"]
+    active_board = st.segmented_control(
+        "结算板块",
+        options=("草根达人结算", "长包达人结算", "解说达人结算"),
+        default="草根达人结算",
+        key="compensation_active_board",
+        label_visibility="collapsed",
     )
-    with grassroot_tab:
+    if active_board == "草根达人结算":
         st.subheader("草根达人月度报酬")
         if data.empty:
             st.info("没有可用于结算的投稿数据。请先在“数据看板”导入月度数据。")
@@ -1628,7 +1635,7 @@ def render(settings: Settings) -> None:
                 creator_repository,
                 settings,
             )
-    with long_term_tab:
+    elif active_board == "长包达人结算":
         st.subheader("长包达人月度报酬")
         if data.empty:
             st.info("没有可用于结算的投稿数据。请先在“数据看板”导入月度数据。")
@@ -1639,7 +1646,7 @@ def render(settings: Settings) -> None:
                 creator_repository,
                 settings,
             )
-    with commentary_tab:
+    else:
         st.subheader("解说达人月度报酬")
         if data.empty:
             st.info("没有可用于结算的投稿数据。请先在“数据看板”导入月度数据。")

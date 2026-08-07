@@ -4,13 +4,14 @@ import json
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from ai.tools import AIToolRegistry
 from database.ai_repository import AIRepository
 from database.dashboard_repository import DashboardRepository
 from database.db import connect, init_db
 from database.koc_repository import KOCRepository
-from services.ai_agent_service import AIAgentService
+from services.ai_agent_service import AIAgentService, AIAgentServiceError
 
 
 def _seed_ai_database(database_path):
@@ -216,3 +217,25 @@ def test_agent_service_executes_tools_and_writes_sanitized_audit(tmp_path):
     assert audit["tool_name"] == "search_creators"
     assert audit["status"] == "SUCCESS"
     assert "API_KEY" not in audit["arguments_json"]
+
+
+def test_agent_service_surfaces_wrapped_rate_limit_errors(tmp_path):
+    class _RateLimitedResponses:
+        def create(self, **_kwargs):
+            raise RuntimeError("exceeded retry limit, last status: 429 Too Many Requests")
+
+    service = AIAgentService(
+        tmp_path / "ai.db",
+        api_key=None,
+        model="test-model",
+        provider="deepseek",
+        base_url="https://api.deepseek.com",
+        client=SimpleNamespace(responses=_RateLimitedResponses()),
+    )
+
+    with pytest.raises(AIAgentServiceError, match="限流（429）"):
+        service.ask(
+            conversation_id="conversation-1",
+            session_id="session-1",
+            message="查询达人",
+        )

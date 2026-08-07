@@ -8,19 +8,14 @@ import pandas as pd
 import streamlit as st
 
 from config.settings import Settings
-from core.dashboard_bootstrap import (
-    DEFAULT_DASHBOARD_SOURCE_DIR,
-    ensure_dashboard_seeded,
-)
+from core.dashboard_bootstrap import DEFAULT_DASHBOARD_SOURCE_DIR
 from core.dashboard_processor import (
     DashboardProcessor,
     DashboardResult,
     build_creator_summary,
     build_daily_summary,
     build_dimension_summary,
-    build_dashboard_result,
     date_bounds,
-    enrich_dashboard_creator_metadata,
     filter_dashboard_data,
 )
 from core.cross_industry import (
@@ -40,6 +35,12 @@ from database.koc_repository import KOCRepository
 from models.enums import CreatorCategory
 from models.koc import KOCRecord
 from services.follower_service import FollowerService
+from ui.dashboard_cache import (
+    dashboard_cache_token,
+    ensure_dashboard_seeded_once,
+    load_prepared_dashboard_data,
+    prepared_dashboard_result,
+)
 
 
 _FILTER_KEYS = (
@@ -2240,7 +2241,10 @@ def render(settings: Settings) -> None:
     st.markdown(DASHBOARD_CSS, unsafe_allow_html=True)
     repository = DashboardRepository(settings.database_path)
     creator_repository = KOCRepository(settings.database_path)
-    bootstrap = ensure_dashboard_seeded(settings.database_path, settings.timezone)
+    bootstrap = ensure_dashboard_seeded_once(
+        settings.database_path,
+        settings.timezone,
+    )
     import_reports = _render_data_update(
         repository,
         settings.database_path,
@@ -2260,17 +2264,22 @@ def render(settings: Settings) -> None:
     if creator_sync_notice:
         st.success(str(creator_sync_notice))
 
-    creator_records = creator_repository.list(include_inactive=False)
-    profile_history = creator_repository.list_profile_history()
-    loaded_result = build_dashboard_result(repository.load_posts())
-    enriched = enrich_dashboard_creator_metadata(
-        loaded_result.data,
+    database_state = dashboard_cache_token(settings.database_path)
+    (
+        prepared_data,
+        file_reports,
+        unmatched_uids,
         creator_records,
-        profile_history,
+        _profile_history,
+    ) = load_prepared_dashboard_data(
+        str(settings.database_path),
+        database_state,
+        include_inactive=False,
     )
-    result = build_dashboard_result(
-        repository.annotate_cross_industry_posts(enriched),
-        loaded_result.file_reports,
+    result = prepared_dashboard_result(
+        prepared_data,
+        file_reports,
+        unmatched_uids,
     )
     if result.data.empty:
         st.title("数据看板")
@@ -2306,18 +2315,22 @@ def render(settings: Settings) -> None:
         f"当前显示 {len(filtered):,} / {len(dashboard_data):,} 条投稿 · "
         f"{scope_label} · {boost_label}"
     )
-    overview_tab, comparison_tab, structure_tab, detail_tab = st.tabs(
-        ["总览", "月度对比", "结构分析", "达人与明细"]
+    active_view = st.segmented_control(
+        "看板视图",
+        options=("总览", "月度对比", "结构分析", "达人与明细"),
+        default="总览",
+        key="dashboard_active_view",
+        label_visibility="collapsed",
     )
-    with overview_tab:
+    if active_view == "总览":
         _render_overview_metrics(filtered)
         st.divider()
         _render_charts(filtered, creator_records)
-    with comparison_tab:
+    elif active_view == "月度对比":
         _render_monthly_comparison(dashboard_data, creator_records)
-    with structure_tab:
+    elif active_view == "结构分析":
         _render_structure_analysis(filtered)
-    with detail_tab:
+    else:
         summary = _render_creator_summary(filtered, creator_records)
         _render_creator_detail(filtered, summary)
         _render_monthly_master(filtered)

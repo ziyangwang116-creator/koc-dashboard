@@ -6,6 +6,7 @@ import sqlite3
 import threading
 from collections.abc import Iterable, Iterator, Sequence
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -321,11 +322,13 @@ def backup_before_tiktok_browser_migration(
     return backup_path
 
 
-def init_db(database_path: Path | str) -> None:
-    if is_postgres_target(database_path):
-        with connect(database_path) as connection:
+@lru_cache(maxsize=8)
+def _init_db_once(database_target: str) -> None:
+    if is_postgres_target(database_target):
+        with connect(database_target) as connection:
             apply_postgres_migrations(connection, DEFAULT_KOCS)
         return
+    database_path = Path(database_target)
     backup_before_tiktok_browser_migration(database_path)
     with connect(database_path) as connection:
         apply_migrations(
@@ -333,6 +336,13 @@ def init_db(database_path: Path | str) -> None:
             DEFAULT_KOCS,
             input_records=_load_input_creator_records(),
         )
+
+
+def init_db(database_path: Path | str) -> None:
+    """Initialize a database target once per application process."""
+    normalized = normalize_database_target(database_path)
+    target = str(normalized.resolve()) if isinstance(normalized, Path) else normalized
+    _init_db_once(target)
 
 
 def get_koc_mapping(

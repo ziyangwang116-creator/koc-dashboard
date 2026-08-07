@@ -33,7 +33,10 @@ def test_dashboard_page_renders_persisted_dashboard_and_update_control():
         widget.label == "异业视频链接" for widget in app.text_area
     )
     assert any(button.label == "识别链接" for button in app.button)
-    assert {tab.label for tab in app.tabs} >= {
+    dashboard_view = next(
+        widget for widget in app.segmented_control if widget.label == "看板视图"
+    )
+    assert set(dashboard_view.options) == {
         "总览",
         "月度对比",
         "结构分析",

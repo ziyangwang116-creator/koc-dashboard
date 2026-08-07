@@ -2,7 +2,9 @@ from streamlit.testing.v1 import AppTest
 
 
 def test_compensation_page_is_a_top_level_function_with_settlement_controls():
-    app = AppTest.from_file("app.py", default_timeout=30).run()
+    app = AppTest.from_file("app.py", default_timeout=30)
+    app.session_state["team_authenticated"] = True
+    app.run()
     app.radio[0].set_value("报酬结算")
     app.run()
 
@@ -20,8 +22,8 @@ def test_compensation_page_is_a_top_level_function_with_settlement_controls():
 def test_compensation_page_contains_a_separate_long_term_settlement_section():
     source = open("ui/compensation.py", encoding="utf-8").read()
 
-    assert 'st.tabs(' in source
-    assert '["草根达人结算", "长包达人结算", "解说达人结算"]' in source
+    assert 'st.segmented_control(' in source
+    assert '("草根达人结算", "长包达人结算", "解说达人结算")' in source
     assert 'st.subheader("长包活动数录入")' in source
     assert '"保存活动数并重新计算"' in source
     assert '"更新长包 YouTube 粉丝数（可选）"' in source
