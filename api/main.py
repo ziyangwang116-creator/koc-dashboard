@@ -10,6 +10,7 @@ from config.settings import Settings, load_settings
 from database.db import is_postgres_target
 from ui.auth import password_matches
 
+from api.compensation import build_compensation_router
 from api.creators import build_creators_router
 from api.dashboard import build_dashboard_router
 from api.session_store import SessionStore
@@ -56,6 +57,12 @@ def create_app(settings: Settings | None = None, *, environment: str | None = No
         require_session=Depends(require_session),
     )
     app.include_router(dashboard_router)
+
+    compensation_router = build_compensation_router(
+        database_path=resolved_settings.database_path,
+        require_session=Depends(require_session),
+    )
+    app.include_router(compensation_router)
 
     @app.get("/api/health")
     def health() -> dict:
