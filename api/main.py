@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -10,6 +10,7 @@ from config.settings import Settings, load_settings
 from database.db import is_postgres_target
 from ui.auth import password_matches
 
+from api.creators import build_creators_router
 from api.session_store import SessionStore
 
 SESSION_COOKIE_NAME = "koc_session"
@@ -28,6 +29,26 @@ def create_app(settings: Settings | None = None, *, environment: str | None = No
     session_store = SessionStore(ttl_seconds=SESSION_MAX_AGE_SECONDS)
 
     app = FastAPI(title="KOC Dashboard API")
+
+    @app.exception_handler(HTTPException)
+    async def _http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+        if isinstance(exc.detail, dict) and "error" in exc.detail:
+            return JSONResponse(status_code=exc.status_code, content=exc.detail)
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+    def require_session(request: Request) -> None:
+        session_id = request.cookies.get(SESSION_COOKIE_NAME)
+        if not session_store.is_valid(session_id):
+            raise HTTPException(
+                status_code=401,
+                detail={"error": {"code": "UNAUTHENTICATED", "message": "未登录或会话已过期。"}},
+            )
+
+    creators_router = build_creators_router(
+        database_path=resolved_settings.database_path,
+        require_session=Depends(require_session),
+    )
+    app.include_router(creators_router)
 
     @app.get("/api/health")
     def health() -> dict:
