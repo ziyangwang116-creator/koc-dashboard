@@ -11,6 +11,7 @@ from database.db import is_postgres_target
 from ui.auth import password_matches
 
 from api.creators import build_creators_router
+from api.dashboard import build_dashboard_router
 from api.session_store import SessionStore
 
 SESSION_COOKIE_NAME = "koc_session"
@@ -49,6 +50,12 @@ def create_app(settings: Settings | None = None, *, environment: str | None = No
         require_session=Depends(require_session),
     )
     app.include_router(creators_router)
+
+    dashboard_router = build_dashboard_router(
+        database_path=resolved_settings.database_path,
+        require_session=Depends(require_session),
+    )
+    app.include_router(dashboard_router)
 
     @app.get("/api/health")
     def health() -> dict:
