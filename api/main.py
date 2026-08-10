@@ -126,6 +126,7 @@ async def _no_op_receive() -> Message:
 
 class LoginRequest(BaseModel):
     password: str | None = None
+    operator_name: str | None = None
 
 
 def create_app(settings: Settings | None = None, *, environment: str | None = None) -> FastAPI:
@@ -152,9 +153,17 @@ def create_app(settings: Settings | None = None, *, environment: str | None = No
                 detail={"error": {"code": "UNAUTHENTICATED", "message": "未登录或会话已过期。"}},
             )
 
+    def get_session_context(request: Request) -> dict:
+        session_id = request.cookies.get(SESSION_COOKIE_NAME) or ""
+        return {
+            "session_id": session_id,
+            "operator_name": session_store.operator_name_for(session_id),
+        }
+
     creators_router = build_creators_router(
         database_path=resolved_settings.database_path,
         require_session=Depends(require_session),
+        session_context=Depends(get_session_context),
     )
     app.include_router(creators_router)
 
@@ -204,7 +213,22 @@ def create_app(settings: Settings | None = None, *, environment: str | None = No
                 },
             )
 
-        session_id = session_store.create()
+        operator_name = (payload.operator_name or "").strip() or None
+        if operator_name is not None and not (2 <= len(operator_name) <= 30):
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "error": {
+                        "code": "VALIDATION_ERROR",
+                        "message": "operator_name 必须为 2-30 个字符。",
+                        "field_errors": [
+                            {"field": "operator_name", "message": "operator_name 必须为 2-30 个字符。"}
+                        ],
+                    }
+                },
+            )
+
+        session_id = session_store.create(operator_name=operator_name)
         response = JSONResponse(content={"data": {"authenticated": True}})
         response.set_cookie(
             key=SESSION_COOKIE_NAME,

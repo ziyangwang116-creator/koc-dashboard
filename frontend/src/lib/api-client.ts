@@ -49,14 +49,18 @@ async function request<T>(
     method?: string;
     params?: Record<string, unknown>;
     body?: unknown;
+    headers?: Record<string, string>;
   } = {}
 ): Promise<T> {
-  const { method = "GET", params, body } = options;
+  const { method = "GET", params, body, headers } = options;
   const res = await fetch(buildUrl(path, params), {
     method,
     credentials: "include",
-    headers: body ? { "Content-Type": "application/json" } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
+    headers: {
+      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+      ...headers,
+    },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
   });
 
   if (res.status === 401) {
@@ -84,9 +88,28 @@ async function request<T>(
   return json as T;
 }
 
+export interface WriteOptions {
+  idempotencyKey?: string;
+}
+
+function writeHeaders(options?: WriteOptions): Record<string, string> | undefined {
+  if (!options?.idempotencyKey) return undefined;
+  return { "Idempotency-Key": options.idempotencyKey };
+}
+
 export const apiClient = {
   get: <T>(path: string, params?: Record<string, unknown>) =>
     request<T>(path, { method: "GET", params }),
-  post: <T>(path: string, body?: unknown, params?: Record<string, unknown>) =>
-    request<T>(path, { method: "POST", body, params }),
+  post: <T>(path: string, body?: unknown, params?: Record<string, unknown>, options?: WriteOptions) =>
+    request<T>(path, { method: "POST", body, params, headers: writeHeaders(options) }),
+  put: <T>(path: string, body?: unknown, options?: WriteOptions & { headers?: Record<string, string> }) =>
+    request<T>(path, {
+      method: "PUT",
+      body,
+      headers: { ...writeHeaders(options), ...options?.headers },
+    }),
+  patch: <T>(path: string, body?: unknown, options?: WriteOptions) =>
+    request<T>(path, { method: "PATCH", body, headers: writeHeaders(options) }),
+  delete: <T>(path: string, body?: unknown, options?: WriteOptions) =>
+    request<T>(path, { method: "DELETE", body, headers: writeHeaders(options) }),
 };

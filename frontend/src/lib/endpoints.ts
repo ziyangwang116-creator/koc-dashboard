@@ -1,4 +1,4 @@
-import { apiClient } from "./api-client";
+import { apiClient, type WriteOptions } from "./api-client";
 import type {
   Creator,
   CreatorDetail,
@@ -39,6 +39,53 @@ export const creatorsApi = {
   list: (params: Record<string, unknown>) =>
     apiClient.get<Envelope<Creator[]>>("/creators", params),
   detail: (id: number) => apiClient.get<{ data: CreatorDetail }>(`/creators/${id}`),
+  create: (body: Record<string, unknown>, options?: WriteOptions) =>
+    apiClient.post<{ data: CreatorDetail }>("/creators", body, undefined, options),
+  update: (id: number, body: Record<string, unknown>, expectedUpdatedAt?: string) =>
+    apiClient.put<{ data: CreatorDetail }>(`/creators/${id}`, body, {
+      headers: expectedUpdatedAt ? { "If-Unmodified-Since": expectedUpdatedAt } : undefined,
+    }),
+  setActive: (id: number, active: boolean) =>
+    apiClient.patch<{ data: CreatorDetail }>(`/creators/${id}/active`, { active }),
+  createContractChange: (
+    id: number,
+    body: Record<string, unknown>,
+    options?: WriteOptions
+  ) =>
+    apiClient.post<{ data: CreatorDetail }>(
+      `/creators/${id}/contract-changes`,
+      body,
+      undefined,
+      options
+    ),
+  createContractCorrection: (
+    id: number,
+    body: Record<string, unknown>,
+    options?: WriteOptions
+  ) =>
+    apiClient.post<{ data: CreatorDetail & { no_change?: boolean } }>(
+      `/creators/${id}/contract-corrections`,
+      body,
+      undefined,
+      options
+    ),
+  deleteContractPeriod: (id: number, sourceEffectiveDate: string, reason?: string) =>
+    apiClient.delete<{ data: CreatorDetail }>(
+      `/creators/${id}/contract-periods/${sourceEffectiveDate}`,
+      reason ? { reason } : undefined
+    ),
+  revertContractRevision: (
+    id: number,
+    revisionId: number,
+    reason: string,
+    options?: WriteOptions
+  ) =>
+    apiClient.post<{ data: CreatorDetail }>(
+      `/creators/${id}/contract-revisions/${revisionId}/revert`,
+      { reason },
+      undefined,
+      options
+    ),
 };
 
 export const dashboardApi = {

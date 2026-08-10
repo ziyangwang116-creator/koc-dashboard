@@ -618,7 +618,12 @@ class KOCRepository:
             and revision.affected_end_date >= month_start
         ]
 
-    def revert_contract_revision(self, revision_id: int) -> KOCRecord:
+    def revert_contract_revision(self, revision_id: int, *, reason: str | None = None) -> KOCRecord:
+        cleaned_reason = (reason or "").strip() or None
+        if reason is not None and cleaned_reason is None:
+            raise KOCRepositoryError("撤销原因不能为空。")
+        if cleaned_reason is not None and len(cleaned_reason) > 500:
+            raise KOCRepositoryError("撤销原因不能超过 500 个字符。")
         with connect(self.database_path) as connection:
             target = connection.execute(
                 "SELECT * FROM creator_contract_revision WHERE id = ?",
@@ -682,7 +687,7 @@ class KOCRepository:
                 affected_end_date=self._stored_contract_date(
                     target["affected_end_date"]
                 ),
-                reason=f"撤销合同修改 #{revision_id}",
+                reason=cleaned_reason or f"撤销合同修改 #{revision_id}",
                 reverted_revision_id=revision_id,
             )
             connection.execute(
