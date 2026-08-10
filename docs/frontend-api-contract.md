@@ -140,8 +140,11 @@
 **请求参数（JSON body）**：
 
 ```json
-{ "password": "string" }
+{ "password": "string", "operator_name": "string" }
 ```
+
+`operator_name` 为**必填**字段，长度限制 2–30 个字符（含首尾）。用于
+服务端审计归属（见第 14 节），不参与密码校验本身。
 
 **返回（200）**：
 
@@ -149,15 +152,17 @@
 { "data": { "authenticated": true } }
 ```
 
-同时通过 `Set-Cookie` 响应头下发 session cookie（见第 9 节），响应体本身不
-包含 token。
+响应体**不回显团队密码**，也**不回显 `operator_name`**（`operator_name`
+仅写入服务端 session store 用于审计，不需要在响应中原样返回）。同时通过
+`Set-Cookie` 响应头下发 session cookie（见第 14 节），响应体本身不包含
+token。
 
 **错误**：
 
 | 状态 | code | 场景 |
 |---|---|---|
 | 401 | `INVALID_CREDENTIALS` | 密码不匹配，对齐 [ui/auth.py:35](../ui/auth.py:35) `password_matches()` 的比较逻辑（`hmac.compare_digest`，防时序攻击，后端实现必须沿用同样的常量时间比较） |
-| 422 | `VALIDATION_ERROR` | `password` 缺失或为空字符串 |
+| 422 | `VALIDATION_ERROR` | `password` 缺失或为空字符串；或 `operator_name` 缺失、为空、或长度不在 2–30 字符范围内 |
 
 **限流建议**（供实现参考，非本阶段强制）：同一 IP/来源连续失败次数超过阈值
 后临时锁定，避免密码暴力破解——现有 Streamlit 版本无此限制，属于安全加固项。
@@ -735,7 +740,12 @@ session 状态，并在响应中下发过期的 Set-Cookie 使浏览器端 cooki
 
 1. 登录成功后，后端生成一个随机 session id（不是团队密码本身、不是 JWT
    编码的密码），存储于服务端 session store（阶段一可用内存或 Redis，字典
-   结构：`session_id -> {issued_at, expires_at}`）。
+   结构：`session_id -> {issued_at, expires_at, operator_name}`）。
+   `operator_name` 来自登录请求体（见第 2 节），**仅用于服务端审计**：
+   - **不得**写入 Cookie（Cookie 只携带随机 `session_id`）；
+   - **不得**放入任何 JWT（本方案本身也不使用 JWT 编码 session）；
+   - **不得**出现在任何前端可见的日志中（仅允许出现在服务端审计日志/
+     数据库审计表中）。
 2. Cookie 属性按部署环境区分，**不是固定写死**：
 
    | 属性 | 本地开发 | 生产环境 |
@@ -756,9 +766,10 @@ session 状态，并在响应中下发过期的 Set-Cookie 使浏览器端 cooki
    `Set-Cookie: koc_session=; Max-Age=0` 使浏览器端立即失效。
 4. 由于是"团队共享一个密码"而非"每用户一个账号"（对齐
    [ui/auth.py:43](../ui/auth.py:43) `require_team_authentication()`
-   的现状），本阶段 session 中不携带用户身份信息，仅代表"已通过团队密码
-   验证"这一布尔状态；如未来需要审计到人，需先在业务上引入多用户账号体系，
-   不在本阶段契约范围内。
+   的现状），session 本身仍只代表"已通过团队密码验证"这一布尔状态，
+   不构成多用户账号体系；`operator_name` 只是登录时手动填写的操作人
+   标注，随 session 存于服务端用于审计归属（见第 2 节、19.6.7），不等同于
+   身份认证，且不会以任何形式暴露给前端（Cookie/JWT/前端日志均不包含）。
 
 ### 14.1 部署拓扑与 CORS
 
@@ -1695,3 +1706,1342 @@ core 逻辑本应不同。前端必须容忍旧版本缺少新增字段（例如
    可分别出现在各赛道结果中，金额互不合并——见 18.0 第 4 条。
 10. **解说 `traffic_boost_enabled`**：在解说接口的 `meta` 中整体省略该字段，
     不返回 `false`——见 18.4。
+
+---
+
+## 19. 第二阶段：写入 API 契约
+
+本章为**设计契约**，不引入任何实现代码。凡未特别说明的通用约定（响应包裹、
+错误格式、分页、排序、认证、敏感信息隔离）一律沿用第 0、14、16 章；所有写
+接口共享的安全规则集中在 19.6，正文各接口不再重复展开，仅在有例外时提及。
+
+**核心原则（贯穿全章，不得违反）**：
+
+1. 写接口只做参数校验、事务编排与序列化，**结算/匹配/排除/阶梯计算逻辑一律
+   复用现有 `core/*` 与 `database/*_repository.py` 函数**，契约中不重新定义、
+   不重新计算任何业务规则——与第 18 章"禁止在 API 层重算阶梯"的强约束一致。
+2. **已锁定（`status = "LOCKED"`）的结算版本永久不可变**，无论后续达人库、
+   粉丝数、汇率、投稿、合同如何变化都不会被回溯修改；任何"更正"都必须表现
+   为创建一个新的草稿版本（更高 `version_no`），绝不允许对已锁定版本做原地
+   UPDATE。
+3. **"新增未来变更"与"修正历史录入错误"是两个不同的端点/流程**，绝不合并为
+   同一个通用的"编辑合同"接口——即使数据库层它们分别对应
+   `create_contract_change()` 与 `correct_contract_period()` 两个已存在的
+   repository 方法，也要求前端在 UI 层用不同入口、不同确认文案区分，防止误将
+   一次性的录入纠错当成真实发生过的业务变更写入历史。
+4. **月度完整导入（按月替换）必须支持"预览 diff → 确认后原子替换"两步流程**，
+   确认前的任何校验失败都不得触碰 `dashboard_post` 表；确认后的替换要么整体
+   成功、要么整体回滚，不允许部分月份被替换、部分月份保留旧数据的中间态。
+5. **后续导入按"当时"有效的达人库合同/UID 规则匹配**，但这只影响"新导入批次
+   如何解析达人归属"，绝不会因此改写已经存在的锁定结算版本——锁定版本读取的
+   是保存时刻的合同快照（`details_json`），后续导入、合同编辑、达人库变更都
+   不会触碰它。
+
+### 19.1 达人库管理（创建 / 编辑 / 启停 / 合同周期）
+
+对应 [database/koc_repository.py:2095](../database/koc_repository.py:2095)
+`create()`、[:2289](../database/koc_repository.py:2289) `update()`、
+[:2580](../database/koc_repository.py:2580) `set_active()`，以及合同周期四
+件套：[:760](../database/koc_repository.py:760) `create_contract_change()`
+（新增变更）、[:876](../database/koc_repository.py:876)
+`correct_contract_period()`（修正历史错误）、
+[:970](../database/koc_repository.py:970)
+`delete_authoritative_contract_period()`（删除错误周期）、
+[:621](../database/koc_repository.py:621) `revert_contract_revision()`
+（撤销/回滚到历史修订）。
+
+#### 19.1.1 `POST /api/creators`（新建达人）
+
+**请求 body**：字段对齐 `create()` 的关键字参数——`user_id`（必填）、
+`koc_name`（必填）、`creator_category`、`contract_types`（字符串数组，
+0.7 节动态字符串，**不是固定 enum**）、`homepage_url`、`follower_count`、
+`youtube_user_id`/`youtube_homepage_url`/`youtube_follower_count`、
+`tiktok_user_id`/`tiktok_homepage_url`/`tiktok_follower_count`、`active`
+（默认 `true`）、`note`、`effective_date`（默认今天）、
+`contract_start_date`/`contract_end_date`（省略则按
+`_contract_period_defaults()` 的合同家族默认区间：草根 5/1–10/31、长包
+5/1–12/31、解说 5/1–8/31）。
+
+**返回（201）**：`data` 为第 4/5 节 `KOCRecord` 结构（新建即返回详情态，
+含 `contract_periods`）。
+
+**错误**：
+
+| 状态 | code | 场景 |
+|---|---|---|
+| 422 | `VALIDATION_ERROR` | `user_id`/`koc_name` 为空；`homepage_url` 非合法 http(s) URL；`follower_count` 非非负整数；`creator_category`/`contract_types` 非法；`contract_end_date < contract_start_date` |
+| 409 | `CONFLICT` | `user_id`/`youtube_user_id`/`tiktok_user_id` 三者中任一与现有达人的这三个字段之一重复（对齐 `DuplicateUserIDError`），`message` 提示"该 UID 已存在，请编辑现有达人记录" |
+
+**事务边界**：`create()` 内部单个 `connect()` 上下文中完成
+`koc_master` 插入、`creator_contract` 批量插入、`creator_contract_period`
+插入、`creator_profile_history` 快照写入、（如有初始粉丝数）
+`follower_update_audit` 写入，五张表在同一事务中提交或整体回滚。
+
+**幂等性**：不提供天然幂等键（`user_id` 唯一约束本身起到"重复请求→409"的
+效果，而非"重复请求→返回同一结果"）。若前端需要防止用户重复点击"保存"导致
+的重复提交，应携带 `Idempotency-Key` 头（值建议为前端生成的 UUID，绑定到
+本次表单提交），服务端在短时间窗口（如 10 分钟）内对相同 Key 返回首次成功
+的响应而不二次写入；具体窗口时长与存储方式留待实现阶段定案（见 19.6）。
+
+**并发冲突**：`user_id` 唯一约束天然由数据库层保证，不需要额外的乐观锁；
+两个并发请求创建同一 `user_id` 时，后到达的请求应转译数据库层
+`IntegrityError` 为 `409 CONFLICT`，而不是 `500`。
+
+**影响范围**：使 `GET /api/creators`、`GET /api/creators/{id}`、
+`GET /api/meta/contract-types`（若引入了新合同类型字符串）、
+`GET /api/dashboard/filter-options`（`creators` 列表）缓存失效；不影响任何
+已存在的结算预览/草稿/锁定版本（新达人在其被创建前的历史结算月份中本就不
+应出现）。
+
+#### 19.1.2 `PUT /api/creators/{id}`（编辑达人基础资料）
+
+对应 `update()`。**用途严格限定为"编辑达人当前基础资料"**（姓名、主页、
+手动粉丝数、启停、备注、以及在未触发"合同变更/合同纠错"语义时的只读展示
+字段同步），**不用于合同周期的新增变更或历史纠错**——那是 19.1.3/19.1.4
+两个独立端点的职责。若请求 body 中的 `contract_types`/`creator_category`
+相对当前值发生了实质变化（对齐 repository 内部
+`contracts_changed`/`category_changed` 判定），前端必须先引导用户走
+19.1.3（新合同变更）流程，本端点对此类"隐式合同变更"的请求应返回 422
+`VALIDATION_ERROR`（`field_errors` 提示"合同类型变化请使用‘新增合同变更’
+接口"），**不得静默接受并当作历史合同处理**。
+
+**请求 body**：同 19.1.1，另加 `manual_follower_update`（bool，标记本次
+粉丝数是否为人工修正，对齐 repository 同名参数）、
+`manual_settlement_eligible`（可选 bool，人工强制标记结算资格）。
+
+**请求头**：`If-Unmodified-Since` 或 `If-Match`（携带上次读取到的
+`updated_at`），用于乐观并发检测（见下）。
+
+**返回（200）**：更新后的 `KOCRecord` 详情态。
+
+**错误**：
+
+| 状态 | code | 场景 |
+|---|---|---|
+| 404 | `NOT_FOUND` | `id` 不存在 |
+| 422 | `VALIDATION_ERROR` | 同 19.1.1 的字段校验；或检测到隐式合同变更 |
+| 409 | `CONFLICT` | `user_id` 与其他达人冲突；或 `If-Unmodified-Since`/`If-Match` 携带的 `updated_at` 与当前记录不一致（说明期间被其他会话修改过），响应体 `error.message` 提示"该达人资料已被修改，请刷新后重试"，`error.field_errors` 可附带服务端当前的 `updated_at` 供前端直接刷新缓存 |
+
+**事务边界**：单次 `update()` 调用内对 `koc_master`/`creator_contract`/
+`creator_contract_period`/`creator_profile_history` 的必要更新在同一
+事务中提交。
+
+**幂等性**：PUT 语义天然幂等（相同 body 重复提交得到相同终态），不强制
+要求 `Idempotency-Key`，但仍建议高风险批量编辑场景携带。
+
+**影响范围**：失效该 `id` 对应的 `GET /api/creators/{id}` 与
+`GET /api/creators` 列表缓存；若粉丝数变化，还会影响后续新建的结算
+**预览**（`mode=preview`）的粉丝数读数，但不影响任何已有的 `saved_draft`/
+`frozen` 版本（快照已固化）。
+
+#### 19.1.3 `POST /api/creators/{id}/contract-changes`（新增合同变更——真实业务变化）
+
+对应 [database/koc_repository.py:760](../database/koc_repository.py:760)
+`create_contract_change()`。**语义**：达人的合同从某个未来（或当前）生效
+日期起，发生了真实的业务变化（例如从 YTB 单合同改为 YTB+TT 双合同、类别
+从草根转为长包），这段变化会成为该达人合同历史上真实存在过的一段周期，
+不可与"更正之前录错的数据"混淆。
+
+**请求 body**：
+
+```json
+{
+  "effective_date": "2026-09-01",
+  "contract_types": ["YTB", "TT"],
+  "contract_end_date": "2026-12-31",
+  "creator_category": "GRASSROOT",
+  "reason": "9月起新增TT合同"
+}
+```
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `effective_date` | string，必填 | `YYYY-MM-DD`，新周期生效日 |
+| `contract_types` | array\<string\>，必填，非空 | 动态字符串（0.7 节） |
+| `contract_end_date` | string，可选 | 省略则按合同家族默认截止日期 |
+| `creator_category` | string，可选 | 省略则按 `contract_types` 自动推导 |
+| `reason` | string，可选 | 变更原因备注，写入 `creator_contract_revision.reason`，**前端表单应引导用户填写**（例如"客户方要求新增短视频合作"），便于后续审计区分"新变更"与"纠错" |
+
+**前端确认提示（强制）**：提交前必须展示"这将作为一次真实的合同变更被记录
+在该达人的合同历史中，从 {effective_date} 起生效"类文案，与 19.1.4 的纠错
+提示在措辞与视觉样式上必须能被用户明显区分（例如变更用"新增"配色，纠错用
+"修正"配色），防止操作者选错入口。
+
+**返回（201）**：更新后的 `KOCRecord` 详情态（含新的 `contract_periods`）。
+
+**错误**：
+
+| 状态 | code | 场景 |
+|---|---|---|
+| 404 | `NOT_FOUND` | `id` 不存在 |
+| 422 | `VALIDATION_ERROR` | `contract_types` 为空；`contract_end_date < effective_date` |
+| 409 | `CONFLICT` | 该生效日已存在合同周期（`existing is not None`），`error.message` 明确提示"该月已有合同周期，请使用"修正填写错误"（见 19.1.4）而不是本接口，避免用户在该场景下误用新增" |
+
+**事务边界**：单事务内完成 `creator_contract_period` 插入/相邻周期截止日
+调整、`_sync_master_contract_period()`（同步 `koc_master`/`creator_contract`
+主表）、`creator_contract_revision` 写入（`operation_type='CHANGE'`）。
+
+**幂等性**：`(creator_id, effective_date)` 天然构成去重键——同一生效日的
+重复提交会被数据库层唯一性检查转译为 409（见上），因此该组合本身即可作为
+`Idempotency-Key` 的语义基础；若前端仍希望使用显式 `Idempotency-Key` 头
+防止网络重试导致的双重提交，建议其值绑定 `(creator_id, effective_date,
+contract_types 排序后拼接)`。
+
+**并发冲突**：两个并发请求对同一达人、同一生效日创建变更时，后到达者收到
+409。
+
+**影响范围**：使该 `id` 的详情/列表缓存失效；使涉及该达人、且结算月份落在
+新周期生效日之后的**预览**（`mode=preview`）重新解析合同（草根按
+`period_month`+发布日期解析生效合同，长包/解说按月末快照解析，见 18.0 第 3
+条）；**不影响任何已存在的 `saved_draft`/`frozen` 版本**——即使这些版本的
+结算月份晚于新合同生效日，它们读取的是保存时刻的合同快照，需要人工另行创建
+新草稿重算才会体现本次变更。
+
+#### 19.1.4 `POST /api/creators/{id}/contract-corrections`（修正历史录入错误）
+
+对应 [database/koc_repository.py:876](../database/koc_repository.py:876)
+`correct_contract_period()`。**语义**：某个已存在的合同周期在最初录入时
+就填错了（合同类型、开始/截止日期），需要原地修正为正确值，**不代表业务上
+真的发生过变化**——修正后该周期在历史时间线上"从未错过"。
+
+**请求 body**：
+
+```json
+{
+  "source_effective_date": "2026-05-01",
+  "contract_types": ["YTB"],
+  "contract_start_date": "2026-05-01",
+  "contract_end_date": "2026-10-31",
+  "reason": "原录入误填为YTB+TT，实际仅有YTB",
+  "expected_updated_at": "2026-08-01T09:00:00Z"
+}
+```
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `source_effective_date` | string，必填 | 定位要修正的现有周期（按其 `start_date` 精确匹配） |
+| `contract_types` | array\<string\>，必填 | 修正后的合同类型 |
+| `contract_start_date` / `contract_end_date` | string，必填 | 修正后的周期起止（**均必填**，与 19.1.3 不同——纠错要求精确指定完整周期，不依赖默认值推导） |
+| `reason` | string，可选 | 纠错原因，写入 revision，前端应提示"请说明这是录入错误而非业务变化" |
+| `expected_updated_at` | string，可选（本契约定案新增） | 前端提交时携带上一次读取到的该达人 `updated_at`，用于区分"基于最新数据的重复提交"（见 no_change 规则）与"基于过期数据的修正"（见下方 409） |
+
+**前端确认提示（强制）**：提交前必须展示"这是对已录入历史数据的更正，
+不会被视为一次新的业务变更"类文案，且必须与 19.1.3 的提示视觉区分（见
+19.1.3）。
+
+**返回（200）**：更新后的 `KOCRecord` 详情态；若命中"内容与当前状态完全
+一致"的重复提交判定（见下方幂等性说明），响应体额外带 `no_change: true`。
+
+**错误**：
+
+| 状态 | code | 场景 |
+|---|---|---|
+| 404 | `NOT_FOUND` | `id` 不存在；或 `source_effective_date` 未命中任何现有周期（`period is None`），`message` 提示"合同周期已刷新，请重新打开后再修正" |
+| 422 | `VALIDATION_ERROR` | 起止日期缺失或 `end < start` |
+| 409 | `CONFLICT` | 修正后的周期与该达人其他周期发生日期重叠（`overlap is not None`） |
+| 409 | `REVISION_EXPIRED` | 携带的 `expected_updated_at` 与该达人当前 `updated_at` 不一致（说明期间已被其他会话修改过），且请求内容与当前状态不同（非 no_change 情形），`message` 提示"该达人数据已被修改，请刷新后重试" |
+
+**事务边界**：单事务内完成目标周期 UPDATE、`_sync_master_contract_period()`
+同步、`creator_contract_revision` 写入（`operation_type='CORRECTION'`）。
+
+**幂等性（本契约定案，取代此前"是否需要去重"的开放问题）**：非新增
+操作，`source_effective_date` 定位到具体行做 UPDATE，天然幂等（相同
+请求重复执行结果一致）；**建议携带 `Idempotency-Key`**（见 19.6.4），
+按"操作类型 + `session_id` + `Idempotency-Key` + 请求体哈希"缓存首次
+结果，24 小时内相同键的重复提交直接返回首次结果，不再重复写入
+`creator_contract_revision`。**若未携带 `Idempotency-Key` 或缓存已过期
+而请求确实重复**：当请求内容与该合同周期当前状态完全一致时，服务端
+返回 `200` 且响应体带 `no_change=true`，**不创建新的 `CORRECTION`
+修订记录**，从根本上消除"审计噪音"问题；若请求基于已过期的旧状态
+（例如期间已被其他会话修正过），则按 `expected_updated_at`/等价字段
+的乐观并发校验返回 409（见 19.6.3 第 4 类冲突）。
+
+**并发冲突**：`source_effective_date` 定位的周期若已被并发的其他修正/删除
+操作改变（找不到匹配行），返回 404 而非静默创建新周期，防止误操作。
+
+**影响范围**：同 19.1.3——失效该达人缓存、影响后续新建预览的合同解析、
+不影响已存在的锁定/草稿版本。**与 19.1.3 的关键区别**：本操作绝不会在
+`GET /api/compensation/periods` 意义上被展示为"该月新增了一次合同变更"，
+而是被视为对现有周期定义的静默修正（前端历史时间线 UI 应把
+`operation_type='CORRECTION'` 的修订记录与 `'CHANGE'` 记录用不同图标/颜色
+区分展示）。
+
+#### 19.1.5 `DELETE /api/creators/{id}/contract-periods/{source_effective_date}`（删除错误录入的周期）
+
+对应
+[database/koc_repository.py:970](../database/koc_repository.py:970)
+`delete_authoritative_contract_period()`。用于彻底删除一段因录入失误而
+产生、且不应该存在的合同周期（区别于 19.1.4 的"周期该存在但内容录错了"）。
+
+**路径参数**：`source_effective_date`（`YYYY-MM-DD`，定位要删除的周期）。
+
+**请求 body（可选）**：`{ "reason": "string" }`。
+
+**返回（200）**：更新后的 `KOCRecord` 详情态。
+
+**错误**：
+
+| 状态 | code | 场景 |
+|---|---|---|
+| 404 | `NOT_FOUND` | 周期不存在（已刷新） |
+| 422 | `VALIDATION_ERROR` | 该达人当前只剩一段合同周期（`len(rows) <= 1`），"每位达人至少需要保留一段合同周期"——不允许删至零段 |
+
+**事务边界**：单事务内删除目标行、调整相邻周期的截止日期、
+`_sync_master_contract_period()`、写入
+`creator_contract_revision`（`operation_type='DELETE'`）。
+
+**幂等性**：重复删除同一 `source_effective_date` 第二次会命中"周期不存在"
+返回 404（而非 200），前端应将"删除后再次删除返回 404"视为预期行为，不
+展示为错误提示，而是提示"该周期已被删除"。
+
+**影响范围**：同 19.1.3/19.1.4；**保留策略（本契约定案）**：删除的周期
+数据仍完整保存在 `creator_contract_revision.before_json` 中
+（`operation_type='DELETE'` 记录的 `before_json` 就是删除前的完整周期
+列表），删除是"从当前有效周期表移除"，不是物理销毁审计痕迹。
+**达人合同周期列表（对应 `GET /api/creators/{id}` 的 `contract_periods`
+及创建者合同周期管理表格 UI）必须提供一个默认关闭（OFF）的"显示已删除
+记录"开关**：开关关闭时按当前行为只展示有效周期；开关打开时额外展示已被
+19.1.5 删除的历史周期（只读，取自对应 `DELETE` 修订记录的 `before_json`），
+供审计/追溯查看，不提供在该只读视图中直接编辑或恢复的能力（恢复应通过
+19.1.3 重新新增一段周期完成，而非"撤销删除"）。
+
+#### 19.1.6 `POST /api/creators/{id}/contract-revisions/{revision_id}/revert`（回滚到历史修订）
+
+对应
+[database/koc_repository.py:621](../database/koc_repository.py:621)
+`revert_contract_revision()`。
+
+**路径参数**：`revision_id`（`creator_contract_revision.id`）。
+
+**请求 body（本契约定案，取代此前"可选"的表述）**：
+
+```json
+{ "reason": "误操作，实际不应新增该合同变更" }
+```
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `reason` | string，**必填**，1–500 字符 | 回退原因，写入新生成的 REVERT 修订记录的 `reason` 字段，用于审计追溯；**repository 层
+`revert_contract_revision()` 当前签名未接收该字段，实现阶段必须扩展其参数
+以接收并落库 `reason`——这是本次已确认的强制需求，不再是"是否扩展"的开放
+问题，只是实现顺序上的前置改造项** |
+
+**返回（200）**：更新后的 `KOCRecord` 详情态。
+
+**错误**：
+
+| 状态 | code | 场景 |
+|---|---|---|
+| 404 | `NOT_FOUND` | `revision_id` 不存在 |
+| 422 | `VALIDATION_ERROR` | 目标本身是一条 `REVERT` 记录（不能再次撤销）；或已被撤销过（`reverted_at is not None`）；或 `reason` 缺失/为空/超过 500 字符 |
+| 409 | `CONFLICT` | 该 `revision_id` 不是该达人"最近一次未撤销的修改"（`latest is None or int(latest["id"]) != revision_id`）——**只能按栈顺序（后进先出）撤销最近一次修改**，不支持跳跃式撤销任意历史节点，`message` 明确提示"只能撤销该达人最近一次未撤销的合同修改" |
+
+**重要语义（本契约定案，已确认为最终决策，不再是开放问题）**：本操作
+**在任何情况下都绝不允许物理删除历史修订记录**，而是**创建一条新的
+`operation_type='REVERT'` 修订记录**，把当前周期表恢复为目标修订
+`before_json` 记录的状态；原始修订记录本身仍保留在
+`creator_contract_revision` 表中（仅打上 `reverted_at`/
+`reverted_revision_id` 标记），符合"历史留痕、不物理删除"的整体审计原则，
+与 19.1.1–19.1.5 的行为一致。
+
+**事务边界**：单事务内完成目标周期表全量替换（`DELETE` 后按
+`before_json` 重新 `INSERT`）、`_sync_master_contract_period()`、写入新的
+REVERT 修订记录（含必填的 `reason`）、更新原修订记录的
+`reverted_revision_id`/`reverted_at`。
+
+**幂等性**：非幂等——对同一 `revision_id` 第二次调用会因
+"已经撤销"（`reverted_at is not None`）返回 422，前端应据此判断"已撤销"
+而非重试。
+
+**影响范围**：同 19.1.3；此外，`GET /api/creators/{id}` 返回的
+`contract_periods` 与 `GET .../contract-revisions`（若未来提供只读修订
+历史查询，见第一阶段第 5 节暂缺此接口，属于后续只读接口补充范围）会立即
+反映回滚结果。
+
+---
+
+### 19.2 投稿与导入
+
+对应 [ui/data_processing.py](../ui/data_processing.py) 编排的 Excel
+整理/校验流程，以及
+[database/dashboard_repository.py:279](../database/dashboard_repository.py:279)
+`save_monthly_import()` 与
+[:234](../database/dashboard_repository.py:234) `upsert_posts()`。
+
+#### 19.2.1 `POST /api/imports/preview`（第一步：上传并预览）
+
+**请求**：`multipart/form-data`，一个或多个 Excel 文件。
+
+**服务端处理**：复用现有整理管线（列名标准化、UID/达人库匹配、异业标记
+`annotate_cross_industry_posts()`）对上传内容做**只读**整理，**不写入
+`dashboard_post`**。
+
+**返回 `data`**：
+
+```json
+{
+  "preview_token": "string",
+  "input_row_count": 320,
+  "matched_row_count": 300,
+  "unmatched_uid_count": 20,
+  "unmatched_rows": [
+    { "row_index": 12, "raw_uid": "abc123", "raw_name": "某某", "reason": "UID在达人库中不存在" }
+  ],
+  "period_months": ["2026-07"],
+  "cross_industry_flagged_count": 5,
+  "column_warnings": ["string"]
+}
+```
+
+- `preview_token`：服务端为本次预览结果生成的临时凭证（建议 TTL 15–30
+  分钟），供第二步 `POST /api/imports/{preview_token}/confirm` 引用，避免
+  客户端把整理后的全量数据往返传输一次。
+- `unmatched_rows`：**强制要求完整列出**每一条因创建者 ID/姓名匹配失败而
+  未能关联到达人库的行，**禁止静默丢弃**——对齐需求"创建者 ID/姓名匹配
+  失败在导入过程中必须产生显式、可见的错误"。前端必须在确认保存前把这些
+  行展示给操作者，由人工决定：（a）先去达人库补录缺失的达人再重新导入，
+  或（b）在确认保存时显式勾选"忽略未匹配行，仅保存已匹配部分"。**未匹配
+  行默认不随确认保存写入**，除非操作者显式选择忽略。
+
+**错误**：401、422（文件格式不可解析、非 `.xlsx`/`.xls`、必需列缺失）。
+
+#### 19.2.2 `POST /api/imports/{preview_token}/confirm`（第二步：确认保存）
+
+**请求 body**：
+
+```json
+{
+  "mode": "replace_months",
+  "include_unmatched": false,
+  "source_file_names": ["7月投稿数据.xlsx"]
+}
+```
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `mode` | enum，必填 | `replace_months`（按月完整替换，对齐 `save_monthly_import(replace_months=True)`）\| `append_or_update`（追加/更新，对齐 `replace_months=False`，等价于现有 `upsert_posts()` 的 upsert 语义） |
+| `include_unmatched` | bool，默认 `false` | 是否连同 19.2.1 返回的 `unmatched_rows` 一并写入（此时这些行的 `koc_name` 等达人库字段为空，对齐现有 UI "相关投稿已保留，koc_name 为空"的行为） |
+| `source_file_names` | array\<string\>，可选 | 覆盖预览阶段记录的文件名（用于展示） |
+
+**返回（200）**：
+
+```json
+{
+  "data": {
+    "batch_id": 42,
+    "mode": "REPLACE_MONTHS",
+    "period_months": ["2026-07"],
+    "input_count": 320,
+    "saved_count": 300,
+    "removed_count": 280
+  }
+}
+```
+
+字段对齐 `DashboardSaveResult`。
+
+**错误**：
+
+| 状态 | code | 场景 |
+|---|---|---|
+| 404 | `NOT_FOUND` | `preview_token` 不存在或已过期，`message` 提示"预览已过期，请重新上传" |
+| 422 | `VALIDATION_ERROR` | `mode` 非法 |
+| 500 | `INTERNAL_ERROR` | 写入过程异常 |
+
+**事务边界（原子性，强制）**：`mode=replace_months` 时，"保存旧数据快照"→
+"删除该批次覆盖月份的旧记录"→"写入新记录"必须在**同一数据库事务**内完成——
+在现有 `save_monthly_import()` 内部单个 `connect()` 上下文中先 `DELETE`
+后 `INSERT`/`UPSERT` 再写 `dashboard_import_batch` 的基础上，**新增一步：
+`DELETE` 之前，先把即将被覆盖月份的 `dashboard_post` 全量行序列化写入新增
+的快照表（例如 `dashboard_import_batch_snapshot`，按 `batch_id` 关联，
+存储被替换前的完整记录 JSON），作为 19.2.3 真回滚的数据来源**；任一步失败
+则整体回滚，`dashboard_post` 表中旧数据保持不变，**不允许出现"部分月份已
+删除但新数据未写入完成"的中间态，也不允许出现"新数据已写入但旧快照未保存
+成功"的中间态**。`mode=append_or_update` 不做删除，仅按
+`record_key`（URL 归一化后的哈希，见 `_record_key()`）做 upsert，天然不
+存在整体回滚需求之外的额外原子性要求。
+
+**幂等性**：`Idempotency-Key` 强烈建议使用（属于"高风险操作"，见 19.6）。
+去重语义定义为"同一个 `preview_token` 只允许成功确认一次"——`confirm`
+接口内部应在事务开始时校验并锁定该 `preview_token` 的状态
+（`pending`/`confirmed`），重复提交同一 `preview_token` 且已成功过一次，
+直接返回首次成功的 `batch_id` 而不二次执行删除/写入，避免网络重试导致
+"按月替换"被误执行两次而产生 `removed_count` 异常。
+
+**并发冲突**：若两个操作者几乎同时对同一 `period_months` 发起
+`replace_months` 确认，后到达的请求应返回 `409 CONFLICT`
+（`message`："该月份数据正在被另一次导入替换，请稍后重试"），**不得**
+允许两个 `replace_months` 事务交错执行。
+
+**影响范围**：`GET /api/dashboard/summary`、`GET /api/dashboard/posts`、
+`GET /api/dashboard/rankings`、`POST /api/dashboard/comparison`
+（涉及 `period_months` 的部分）、`GET /api/dashboard/filter-options`、
+`GET /api/dashboard/import-batches`、`GET /api/compensation/periods`
+（`has_posts` 字段）、`GET /api/compensation/grassroot`/`long-term`/
+`commentary` 的**预览**（`mode=preview`）结果全部失效并需要重新拉取；
+**已存在的 `saved_draft`/`frozen` 结算版本不受影响**（读取的是保存时刻
+快照，不随投稿数据变化）。
+
+#### 19.2.3 `POST /api/dashboard/import-batches/{batch_id}/rollback`（导入批次回滚）
+
+**新增写接口。** 对应"导入批次记录必须可审计、可真实回滚"的需求。**本
+契约定案：回滚必须是真回滚（完整恢复被替换前的旧数据），"仅删除本批次
+写入的记录、无法恢复旧数据"的方案不可接受。** 依赖 19.2.2 中新增的
+`dashboard_import_batch_snapshot`（或等价快照存储）——该表在每次
+`mode=replace_months` 执行时，于同一事务中保存被覆盖月份的
+`dashboard_post` 完整旧数据；本端点即读取该快照做原子恢复。现有
+repository 层暂无该仓储方法，实现阶段需新增"读取指定 `batch_id` 对应的
+旧数据快照，并在同一事务内先删除本批次写入的新记录、再从快照原样
+`INSERT` 回旧记录"的方法——本契约只定义 API 形状与语义约束，不预设其
+内部 SQL 写法。
+
+**请求 body**：`{ "reason": "string（可选）" }`。
+
+**返回（200）**：
+
+```json
+{
+  "data": {
+    "batch_id": 42,
+    "restored_count": 280,
+    "removed_count": 300
+  }
+}
+```
+
+**错误**：404（`batch_id` 不存在，或该批次对应的快照缺失/已过期——理论上
+不应发生，因为快照与批次同一事务写入且长期保留，若出现说明数据异常，
+需按 500 而非静默 404 处理，具体错误码留待实现阶段结合快照保留策略
+细化）、422（该批次早于最近一次针对同月份的后续导入，回滚会与更新的数据
+冲突，此时应拒绝并提示"存在更新的导入批次，无法安全回滚，请联系管理员
+处理"——**回滚只允许针对"最近一次覆盖某月份"的批次**，不支持跳跃式回滚到
+任意历史批次，语义与 19.1.6 `revert_contract_revision()` 的"只能撤销最近
+一次"原则保持一致）、409（并发回滚冲突）。
+
+**事务边界（原子性，强制）**：单事务内完成"删除本批次写入的新记录"→
+"从快照恢复旧记录"两步，整体成功或整体失败；不允许出现"新记录已删除但旧
+记录未恢复"的中间态。
+
+**快照保留策略（本契约定案）**：`dashboard_import_batch_snapshot` 长期
+保留，不做 TTL 自动清理（不同于 19.2.1 的 `preview_token`），因为回滚是
+低频但高风险的审计相关操作，需要保证任意时间点都能追溯到"最近一次替换前
+的完整旧数据"；是否需要在数据量过大后引入归档策略，属于后续容量规划问题，
+不影响本契约的接口语义。
+
+**影响范围**：同 19.2.2。回滚成功后 `dashboard_post` 完整恢复为
+被替换前的状态（不仅仅是"删除"），因此所有依赖 `period_months` 的读接口
+与结算**预览**均需失效重新拉取；**已存在的 `saved_draft`/`frozen` 结算
+版本不受影响**（快照已固化，不随投稿数据回滚而改变）。
+
+#### 19.2.4 跨行业互斥标记 / 取消标记
+
+对应 [database/dashboard_repository.py:163](../database/dashboard_repository.py:163)
+`save_cross_industry_exclusions()`、
+[:205](../database/dashboard_repository.py:205)
+`deactivate_cross_industry_exclusions()`，均复用
+[core/cross_industry.py](../core/cross_industry.py) 既有的 URL 归一化与
+标记机制（`normalize_video_url()`/`annotate_cross_industry_posts()`），
+**API 层不新造匹配逻辑**。
+
+**`POST /api/cross-industry-exclusions`（新增/重新激活标记）**
+
+请求 body：
+
+```json
+{ "urls": ["https://..."], "reason": "该视频为品牌合作，非本项目内容" }
+```
+
+返回 `data`：`list_cross_industry_exclusions()` 的最新数组（见
+`database/dashboard_repository.py:134` 结构）。
+
+**`DELETE /api/cross-industry-exclusions/{id}`（取消标记，软删除）**
+
+对应 `deactivate_cross_industry_exclusions([id])`，仅将 `active` 置 0，
+**不物理删除记录**（保留标记历史）。返回 `{ "data": { "deactivated": 1 } }`；
+若 `id` 不存在或已是非激活状态，返回 `{ "data": { "deactivated": 0 } }`
+而非报错（幂等）。
+
+**强制不变量**：标记/取消标记**只影响判定字段
+`is_cross_industry`/`compensation_eligible`（第 10 节 posts 接口）与后续
+聚合口径**，`dashboard_post` 表中投稿自身的原始字段（播放量、标题、发布
+日期等）**绝对不被修改**——标记机制是"叠加一层排除规则"而不是"编辑投稿
+内容"，这一点与合同修正（19.1.4，会真正修改数据）有本质区别。
+
+**事务边界**：单条 `INSERT ... ON CONFLICT DO UPDATE` / `UPDATE`，天然
+原子。
+
+**幂等性**：`url_key`（URL 归一化后的唯一键）天然幂等——重复标记同一 URL
+只会更新 `reason`/`active`，不会产生重复记录。
+
+**影响范围**：失效 `GET /api/dashboard/posts`（`is_cross_industry`/
+`compensation_eligible` 字段）、`summary`/`rankings`/`comparison`
+（当 `include_cross_industry=false` 时的聚合结果，即默认口径）、以及
+所有结算**预览**（`exclude_cross_industry_posts()` 前置过滤）；不影响
+已存在的 `saved_draft`/`frozen` 版本。
+
+---
+
+### 19.3 月度结算前置配置
+
+对应各结算模块在"生成预览/草稿之前"需要人工录入的按月配置项，均为
+"按 `period_month` 覆盖式保存"的幂等写接口，全部对应
+[database/dashboard_repository.py](../database/dashboard_repository.py)
+中已存在的 `INSERT ... ON CONFLICT DO UPDATE` 方法，**API 层不改写这些
+方法的写入语义**。
+
+#### 19.3.1 `PUT /api/compensation/{period_month}/exchange-rate`
+
+**本契约定案（修正此前按赛道拆分路径的草案）**：JPY→USD 汇率是**按月
+全局唯一的一个值**，不区分草根/长期/解说三条赛道——三条赛道共享同一个
+`get_jpy_to_usd_rate(period_month)`/`save_jpy_to_usd_rate()` 读写口径
+（`database/dashboard_repository.py:398`），路径不再挂在
+`/api/compensation/grassroot/...` 之下，改为顶层
+`/api/compensation/{period_month}/exchange-rate`，避免造成"三条赛道各自
+有独立汇率"的误解。
+
+请求：`{ "rate": 149.5 }`。
+
+返回：`{ "data": { "period_month": "2026-07", "rate": 149.5 } }`。
+
+**错误**：422（`rate <= 0`，对齐仓储层 `ValueError`；`period_month`
+格式非 `YYYY-MM`）。
+
+**事务边界**：单条 upsert，天然原子。**幂等性**：天然幂等（同值重复保存
+无副作用）；不建议要求 `Idempotency-Key`。**并发**：不做乐观并发校验
+（汇率是"整月覆盖"配置，后写覆盖先写是预期行为，不视为冲突）。
+
+**影响范围（本契约定案）**：该月**草根、长期、解说三条赛道的当前
+预览（`mode=preview`）** 全部立即按新汇率重算——因为三者共享同一个
+`period_month` 维度的汇率值；**已 `saved_draft`/`frozen`（即
+`LOCKED`）的版本完全不受影响**，无论属于哪条赛道，因为汇率在版本创建
+（19.5.1）那一刻已作为 `jpy_to_usd_rate` 字段固化进该版本自己的快照，
+本接口的后续修改绝不会回溯改写任何已保存草稿或已锁定版本所使用的汇率。
+
+#### 19.3.2 `PUT /api/dashboard/{period_month}/traffic-boost`
+
+**本契约定案（修正此前按赛道拆分路径、暗示"草根与长期各自独立配置"的
+草案）**：流量加成开关是**按月全局唯一的一个开关**，对应看板第 8 节
+`traffic_boost_mode=saved_setting` 所读取的同一张
+`dashboard_traffic_boost_setting` 表（`get_traffic_boost_enabled()`/
+`save_traffic_boost_enabled()`，`database/dashboard_repository.py:414/427`），
+**全项目只有一个每月开关，不存在"草根一个开关、长期另一个开关"的独立
+配置**——此前草案中"语义与草根‘下沉引流加成’是两个独立配置维度，实现时
+不得混用同一张配置表"的表述是错误的，予以删除更正：该表就是唯一权威
+存储，草根与长期都读取同一行。
+
+路径改为顶层 `/api/dashboard/{period_month}/traffic-boost`（与看板模块
+共用同一张配置表保持路径归属一致），请求/返回形状不变：
+
+请求：`{ "enabled": true }`。返回：
+`{ "data": { "period_month": "2026-07", "enabled": true } }`。
+
+**影响范围（本契约定案，取代此前按赛道各自列出的版本）**：本开关影响
+且仅影响以下三处：
+
+1. 看板第 8 节 `GET .../summary`/`posts`/`rankings`/`comparison` 等在
+   `traffic_boost_mode=saved_setting`（默认展示口径）下的 `views` 计算；
+2. 草根结算的**当前预览**（`mode=preview`，不含 `saved_draft`/`frozen`）；
+3. 长期结算的**当前预览**（`mode=preview`，不含 `saved_draft`/`frozen`）。
+
+**明确不受影响**：解说（commentary）赛道——按第 18 章约定，解说结算口径
+从不引入流量加成概念，本开关变化不触发解说预览的任何重算，解说结算
+接口的 `meta` 中也始终不出现 `traffic_boost_enabled` 字段（详见第一阶段
+第 8/9 节）；任何已 `saved_draft`/`frozen` 的草根或长期结算版本——
+开关在版本创建时已固化为该版本快照的一部分（`traffic_boost_enabled`
+字段，见 19.5.4），后续切换开关绝不会回溯改变已保存的版本。
+
+**错误/事务/幂等/并发**：同 19.3.1。
+
+#### 19.3.3 `PUT /api/compensation/long-term/{period_month}/activity-counts`
+
+对应 `save_long_term_activity_counts()`（:477），**按 `creator_id` 批量
+覆盖式保存**（传 `null`/缺省的达人会被 `DELETE`，等同清空该达人本月
+活动数——需要在前端交互上明确提示"留空 = 清除已录入的活动数"，避免
+误清空）。
+
+请求：
+
+```json
+{ "activity_counts": { "101": 3, "102": null } }
+```
+
+`102` 传 `null` 表示删除该达人本月的活动数记录（对齐仓储层
+`_clean_long_term_activity_count(None) -> None` 触发 `DELETE` 分支）。
+
+返回：`{ "data": { "period_month": "2026-07", "updated_count": 2 } }`。
+
+**错误**：422（`creator_id` 非法达人 ID、活动数非非负整数——对齐
+`ValueError("每月活动数必须为非负整数。")`；`creator_id` 不存在——对齐
+`ValueError("达人记录不存在。")`）。
+
+**事务边界**：单个 `connect()` 内对 `activity_counts` 逐条
+`DELETE`/`UPSERT`（仓储层当前实现是逐条 `execute` 而非
+`executemany`，本契约按现状描述，不预设批量化优化）。**幂等性**：天然
+幂等。**并发**：不做乐观并发校验（按月覆盖式配置）。
+
+**影响范围**：该月 long-term 结算预览；不影响已锁定版本。
+
+#### 19.3.4 评论区指定主题申报
+
+`PUT /api/compensation/commentary/{period_month}/theme-submissions`
+
+对应 `replace_commentary_theme_submissions()`（:1039），依赖
+`list_commentary_theme_definitions()`（:974）做主题代码合法性校验。
+
+请求（本契约定案：**整月完整替换**，见下）：
+
+```json
+{
+  "expected_revision": "rev_20260710_1",
+  "rows": [
+    {
+      "creator_id": 101,
+      "theme_code": "SPRING2026",
+      "content_format": "LONG",
+      "urls": ["https://..."],
+      "submitted_date": "2026-07-15",
+      "review_status": "PENDING",
+      "note": null
+    }
+  ]
+}
+```
+
+**错误**：422，场景包括：`theme_code` 不在
+`commentary_theme_definition` 中（对齐
+`ValueError(f"指定主题不存在：{theme_code}")`）；同一达人同一主题重复
+出现在同一请求中（对齐 `ValueError("同一达人同一主题每月只能申报一次。")`）；
+`content_format` 不在 `{LONG, SHORT}`；`review_status` 不在
+`{PENDING, APPROVED, REJECTED}`。409（`REVISION_EXPIRED`）：
+`expected_revision` 与服务端当前该月的最新修订标识不一致，说明期间已被
+其他会话保存过一次新的完整列表，`message` 提示"该月申报列表已被其他会话
+更新，请刷新后基于最新列表重新提交"。
+
+**关键不变量（必须与第 18 章保持完全一致，不得在此重新定义）**：
+指定主题一旦审核通过（`review_status=APPROVED`），**无论其 URL 是否与
+投稿库中的实际链接匹配，都计入该达人本月的奖励**；只有"已匹配到具体
+投稿链接"的部分会从"可计费/去重"视图中排除，避免重复计酬——该规则的
+唯一权威定义在第 18 章，本节仅描述"如何提交/编辑申报"，不重新定义匹配
+与排除口径。
+
+**语义（本契约定案，取代此前"需实现时确认范围"的开放问题）**：
+`replace_commentary_theme_submissions()` 在本接口中**必须**按"整月完整
+替换"语义使用——即每次调用都代表该 `period_month` 下**全部**申报记录的
+最新完整状态，**绝不允许把局部/增量 payload 直接透传给该函数从而静默
+覆盖/丢弃当月其他未包含在本次请求中的申报记录**。前端交互流程固定为：
+（1）先调用读接口取回该月完整的当前申报列表及其 `expected_revision`
+标识；（2）在本地基于该完整列表做增删改；（3）把修改后的**完整列表**
+连同读取到的 `expected_revision` 一并提交给本接口。服务端在同一事务内
+校验 `expected_revision` 匹配后原子替换该月全部记录；若 `expected_revision`
+已过期（服务端当前修订与之不一致），拒绝并返回 409（见上），**不做部分
+合并**。若现有 `replace_commentary_theme_submissions()` repository 方法
+签名尚不支持 `expected_revision` 校验，实现阶段需扩展其参数以支持——这是
+已确认的实现前置改造项，不再是语义层面的开放问题。
+
+**幂等性**：整体替换语义下天然幂等（相同 `rows`+ `expected_revision`
+重复提交结果一致；`expected_revision` 过期的重复提交会稳定返回 409 而非
+重复生效，避免误判为"成功"）。**并发**：通过 `expected_revision` 做乐观
+并发校验（见上），不再是"不做校验"。
+
+**影响范围**：该月 commentary 结算预览（申报是否计入奖励、匹配排除
+判定）；不影响已锁定版本。
+
+---
+
+### 19.4 粉丝更新
+
+对应 [services/follower_service.py](../services/follower_service.py)
+`FollowerService`，API 层**不重新实现**平台识别/抓取/成功失败落库逻辑，
+只是把已有的 `update_one`/`preview_tiktok`/`confirm_tiktok_preview`/
+`update_many`/`update_all_tiktok`/`update_all_youtube` 包装为 HTTP 接口。
+
+**平台路由规则（不变量，与 `FollowerService._contract_platforms()` 保持
+完全一致）**：达人的合同类型文本中若包含 `"tt"`/`"tiktok"`
+（大小写和空格不敏感）则视为持有 TikTok 合同，若包含
+`"ytb"`/`"youtube"` 则视为持有 YouTube 合同；仅持有其一时，
+`required_platform_for_record()` 唯一确定抓取平台；**同时持有两者或都不
+持有时返回 `None`，此时前端必须让操作者手动指定平台**，不得由 API 层
+臆测。命名规则里的 "TT" 前缀正是这里"TikTok 合同"判定的来源，API 层
+不新增额外的命名解析规则。
+
+#### 19.4.1 `POST /api/followers/{creator_id}/update`（单个手动更新）
+
+对应 `update_one()`。请求 body：`{ "required_platform": "TikTok" }`
+（可选；缺省时由 `record.homepage_url` 与合同类型推断）。
+
+返回（200，无论抓取成功或失败都是 200，因为"抓取失败"是业务结果而非
+HTTP 错误）：
+
+```json
+{
+  "data": {
+    "record_id": 101, "user_id": "abc", "koc_name": "某某",
+    "status": "成功", "platform": "TikTok", "follower_count": 15000,
+    "error_code": null, "message": "更新成功"
+  }
+}
+```
+
+`status` ∈ `{成功, 跳过, 失败}`，对齐 `_save_result()` 的三分支：
+成功写入 `apply_follower_success()`（`sync_status=SUCCESS`,
+`operator_mode=AUTOMATIC`）；`error_code` 属于 `SKIPPED_ERROR_CODES` 时
+写入 `record_follower_attempt()`（记录尝试但不算失败，例如
+`DATA_SOURCE_NOT_CONFIGURED` 等已知的"暂不可用"场景）；其余失败写入
+`apply_follower_failure()`。**三种结果都会落库（成功值/跳过原因/失败
+原因），不存在"什么都不记录"的静默情况**。
+
+**错误**：404（`creator_id` 不存在，对齐 `ValueError("未找到要更新粉丝数
+的达人。")`）。
+
+**事务边界**：单条 upsert（`apply_follower_success`/
+`apply_follower_failure`/`record_follower_attempt` 各自内部单事务）。
+**幂等性**：重复调用会重新抓取并覆盖上一次结果——**这不是传统意义的
+幂等写（结果可能因外部数据源变化而不同），不要求 `Idempotency-Key`**；
+但重复调用不会产生副作用叠加（每次都是"覆盖式"落库，不是"追加"）。
+**并发**：不做乐观并发校验（抓取结果覆盖是预期行为）。
+
+#### 19.4.2 TikTok 预览确认二步流程
+
+**`POST /api/followers/{creator_id}/tiktok-preview`** —— 对应
+`preview_tiktok()`：只抓取、不落库，返回抓取结果供人工核对
+（TikTok 抓取依赖浏览器自动化，结果不总是可信，因此设计为"先看一眼
+再决定是否采纳"）。
+
+返回：`{ "data": { "follower_count": 15000, "platform": "TikTok", "success": true, "error_code": null } }`。
+
+**`POST /api/followers/{creator_id}/tiktok-preview/confirm`** —— 对应
+`confirm_tiktok_preview()`：请求体需回传上一步返回的完整抓取结果
+（`follower_count`/`platform`/`success` 等字段，供服务端重新构造
+`FollowerFetchResult` 并落库），**服务端不重新抓取，只落库**。
+
+**错误**：422（`success=false` 或 `platform != "TikTok"` 或
+`follower_count` 为空——对齐 `ValueError("只能确认写入成功的 TikTok
+测试结果。")`）；404（`creator_id` 不存在）。
+
+**幂等性**：与 19.4.1 相同，覆盖式落库不叠加副作用。**并发**：不做
+乐观并发校验。
+
+#### 19.4.3 批量更新（本契约定案：改为异步任务 + 状态轮询模式）
+
+**取代此前"同步长请求"设计**：批量更新（尤其 TikTok 浏览器自动化）耗时
+不可控，同步长请求容易触发前端/网关/浏览器层面的 HTTP 超时。本契约确定
+采用"创建任务 → 轮询进度 → 读取明细结果"的异步任务模式，取代原先单个
+同步 `POST /api/followers/batch-update` 直接返回完整
+`BatchFollowerUpdateResult` 的设计。三个端点如下，底层仍复用现有
+`update_many()`（及 `update_all_tiktok()`/`update_all_youtube()`，见
+19.4.4）逐条抓取/落库的既有逻辑，**API 层不重新实现批量更新的业务规则，
+只是把同步调用改造为在后台任务中执行、并暴露任务状态查询接口**。
+
+**`POST /api/followers/batch-update-jobs`（创建批量更新任务）**
+
+请求 body：
+
+```json
+{
+  "record_ids": [101, 102, 103],
+  "required_platform": null,
+  "platform_by_record": { "101": "TikTok", "102": "YouTube" }
+}
+```
+
+字段含义同此前 19.4.3 草案（`record_ids`/`required_platform`/
+`platform_by_record`）。**返回（202）**：
+
+```json
+{ "data": { "job_id": "job_abc123", "status": "PENDING", "total": 3, "created_at": "2026-08-10T10:00:00Z" } }
+```
+
+服务端立即返回 `job_id`，实际抓取在后台异步执行（内部仍是对
+`update_many()` 的调用，只是执行位置从"请求处理线程内同步等待"改为
+"后台任务/队列"）。**错误**：422（`record_ids` 为空）。
+
+**`GET /api/followers/batch-update-jobs/{job_id}`（轮询任务进度）**
+
+返回：
+
+```json
+{
+  "data": {
+    "job_id": "job_abc123",
+    "status": "RUNNING",
+    "total": 3, "processed": 1,
+    "success": 1, "failed": 0, "skipped": 0,
+    "youtube_success": 1, "youtube_failed": 0,
+    "tiktok_success": 0, "tiktok_failed": 0,
+    "started_at": "2026-08-10T10:00:01Z",
+    "finished_at": null
+  }
+}
+```
+
+`status` ∈ `{PENDING, RUNNING, SUCCEEDED, FAILED}`（`FAILED` 仅指任务本身
+异常终止，不代表批次内某些记录抓取失败——单条记录失败属于正常业务结果，
+反映在下方明细接口的 `status=失败` 行中，不影响任务整体 `status`）。
+前端以固定间隔（建议 2–3 秒）轮询直至 `status` 进入终态
+（`SUCCEEDED`/`FAILED`）。
+
+**`GET /api/followers/batch-update-jobs/{job_id}/results`（只读，逐条
+成功/失败明细）**
+
+任务进入 `SUCCEEDED` 后可读取完整明细（`RUNNING`/`PENDING` 阶段返回已
+处理部分的明细，供前端做"实时进度列表"展示亦可）：
+
+```json
+{
+  "data": {
+    "job_id": "job_abc123",
+    "rows": [ { "user_id": "abc", "koc_name": "某某", "status": "失败", "platform": "TikTok", "follower_count": null, "tiktok_username": null, "error_code": "RECORD_NOT_FOUND", "message": "达人记录不存在。" } ]
+  }
+}
+```
+
+`rows` 明细字段（`_detail_row()`：`user_id`/`koc_name`/`status`/
+`platform`/`follower_count`/`tiktok_username`/`error_code`/`message`）
+与此前同步设计中的返回结构完全一致，只是从"同步响应体"搬到了本只读
+明细接口。
+
+**逐条失败不中断整批**：单条 `RECORD_NOT_FOUND`/抓取失败只记录该行的
+`status=失败`，任务继续处理后续 `record_id`（对齐 `update_many()` 的
+`for` 循环体，非抓取异常不会中断循环）；只有 TikTok 批次因
+`TIKTOK_BATCH_STOP_ERROR_CODES` 中的错误码触发"批次熔断"时，才会对
+**尚未处理的剩余记录**统一标记为 `status=失败`、
+`error_code=TIKTOK_BATCH_STOPPED`（对齐 `_stopped_result()`），这是为了
+避免在 TikTok 反爬限制触发后继续无意义地发起大量请求，此时任务本身仍以
+`status=SUCCEEDED` 结束（熔断是批次级别的业务保护，不是任务执行异常）。
+**这一"熔断"不等同于事务回滚**——已经成功写入的记录不会被撤销。
+
+**同批次重复 ID/用户名跳过**：`update_many()` 内部对
+`seen_user_ids`/`seen_tiktok_usernames` 做同批次去重，重复者标记
+`status=跳过`、`error_code=DUPLICATE_CREATOR`，避免同一账号在一次批次
+里被处理两次导致的资源浪费或数据竞争。
+
+**幂等性**：创建任务接口不做防重复创建校验（同 19.5.1 的设计取舍——
+每次调用都创建一个新 `job_id`，防止误触发产生重复任务是前端交互层
+责任）；任务内部的落库行为同 19.4.1，覆盖式落库不叠加副作用。
+**并发**：不做乐观并发校验；同批次内部去重已覆盖"同批次并发"场景。
+
+**实现前置事项**：具体任务队列/后台执行机制（进程内线程池、独立
+worker 进程、或引入任务队列中间件）由实现阶段按现有部署环境选型，本
+契约只约束上述三个端点的请求/响应形状与状态机语义。
+
+#### 19.4.4 `POST /api/followers/batch-update-jobs/all-tiktok` / `all-youtube`
+
+对应 `update_all_tiktok()`/`update_all_youtube()`：分别对
+`tiktok_contract_records()`（持有 TikTok 合同的全部达人）与对应
+YouTube 全量集合创建 19.4.3 同结构的批量更新任务，底层复用 19.4.3 的
+`update_many()` 逻辑与异步任务/轮询/明细三端点结构，**API 层不重复定义
+批量更新的业务规则**。
+
+**TikTok 候选人筛选规则（动态判定，禁止固定白名单）**：`all-tiktok`
+及 19.4 全部涉及"是否属于 TikTok 更新对象"判定的接口/筛选逻辑，必须以
+达人**当前生效合同周期**的**动态合同类型**为准——即取该达人当前有效的
+合同变更记录中实际生效的合同类型文本，而非任何写死的查表结果。判定
+规则统一为：将合同类型文本做大小写归一化（`lower()`）后，只要**包含
+子串 `"tt"`**即视为 TikTok 更新候选人。**禁止使用固定枚举白名单**（例如
+`["TT", "4月TT", "5月TT"]`），必须是子串匹配而非枚举匹配，这样才能自动
+覆盖未来新增的合同类型命名，例如 `6月TT`、`YTB长+TT`，或任何其他将来
+出现的、包含 "TT" 的合同类型字符串，无需修改判定逻辑即可自动纳入。
+
+**`tiktok_user_id` 前置校验**：候选人还必须具备有效的 `tiktok_user_id`
+才能真正发起抓取；若某达人合同类型判定为 TikTok 候选但缺失
+`tiktok_user_id`，**不得**因此中断或失败整个批次，而是在该批量任务的
+逐条结果明细（19.4.3 `.../results` 接口的 `rows`）中为该达人单独记录一条
+`status=失败`（或 `跳过`，与 `SKIPPED_ERROR_CODES` 分类一致）、附带对应
+`error_code`/`message` 说明"缺失 tiktok_user_id"，其余达人正常继续处理。
+
+**影响范围（19.4 全部接口共同）**：`GET /api/creators`/
+`GET /api/creators/{id}`（`follower_count`/`follower_updated_at` 等
+字段）、依赖粉丝数的结算预览（若结算规则中有粉丝数分档逻辑，见
+`core/*_compensation.py`）；**不影响已 `saved_draft`/`frozen` 的结算
+版本**（粉丝数已固化进快照）。粉丝更新**从不需要**
+`Idempotency-Key`（抓取结果本身具有时效性，重复请求应重新抓取而非
+返回缓存结果）。
+
+---
+
+### 19.5 报酬结算版本
+
+对应三条结算赛道各自的
+`create_*_draft()`/`update_*_draft()`/`lock_*_version()` 三件套
+（草根：`create_compensation_draft`/`update_compensation_draft`/
+`lock_compensation_version`，:667/:706/:743；长期：
+`create_long_term_compensation_draft`/`update_long_term_compensation_draft`/
+`lock_long_term_compensation_version`，:779/:818/:855；评论区：
+`create_commentary_compensation_draft`/`update_commentary_compensation_draft`/
+`lock_commentary_compensation_version`，:1133/:1177/:1214）。三条赛道
+的 API 形状完全对称，以下以草根为例给出完整定义，长期/评论区仅列出
+差异点。
+
+**版本三态模型（权威定义见第 18 章 18.0 第 2 点，本节仅引用、不重新
+定义）**：`preview`（实时按当前数据重算，不落库、无 `version_id`）→
+`saved_draft`（`status=DRAFT`，落库快照，仍可编辑）→
+`frozen`（`status=LOCKED`，落库快照，**不可再编辑**）。19.5 只负责
+`saved_draft`/`frozen` 两态的写操作；`preview` 态是纯读接口（见第一阶段
+第 8 节结算预览），不在本节范围。
+
+#### 19.5.1 `POST /api/compensation/grassroot/{period_month}/drafts`（创建草稿）
+
+对应 `create_compensation_draft()`。请求 body：
+
+```json
+{
+  "jpy_to_usd_rate": 149.5,
+  "details": [ { "creator_id": 101, "...": "..." } ],
+  "summary": { "total_jpy": 1000000 },
+  "note": "7月首次提交"
+}
+```
+
+**说明**：`details`/`summary` 由前端从当前 `preview` 接口获取的完整
+计算结果原样提交（**前端不重新计算，只是把已展示给操作者确认过的
+预览结果落库**）——这是"预览 → 草稿"的确认落库模式，本质是 19.6 中
+"预览/确认二步流程"的一个实例：先调用只读预览接口看到结果，操作者
+确认无误后再调用本接口把该次预览结果固化为可追溯的草稿版本。
+
+**返回（201）**：`CompensationVersion` 完整结构
+（`id`/`period_month`/`version_no`/`status=DRAFT`/`jpy_to_usd_rate`/
+`details`/`summary`/`note`/`created_at`/`updated_at`）。`version_no`
+在同一 `period_month` 内自增（`MAX(version_no)+1`，同一 `connect()`
+事务中先查后插，避免并发下 `version_no` 冲突）。
+
+**实现前置事项（本契约定案，非假设）**：`(period_month, version_no)`
+组合是本节及 19.5.2/19.5.3 全部并发/冲突判定逻辑的最终防线（"先查后插"
+只能降低但不能完全消除并发窗口下的重复）。**在实现本节写接口之前，
+必须先核实数据库 schema 中 `grassroot_compensation_version`/
+`long_term_compensation_version`/`commentary_compensation_version`
+三张表是否已存在 `(period_month, version_no)` 唯一约束；若不存在，必须
+先编写迁移添加该约束，并补充相应的约束生效测试（例如并发插入同一
+`version_no` 时数据库层应拒绝第二次插入），再开始实现本章写接口**——
+这是一项前置验证/迁移任务，不是可以延后或默认已具备的假设。
+
+**错误**：422（`jpy_to_usd_rate <= 0`）。
+
+**幂等性**：**不使用 `Idempotency-Key` 做"防重复创建"**——每次调用都
+应该创建一个新版本（`version_no` 递增），这是设计意图，"防止误触发
+产生多个几乎相同的草稿"是前端交互层面的责任（例如按钮提交后禁用），
+不是服务端幂等语义的责任。若网络重试导致同一次操作被提交两次，会产生
+两个内容相同但 `version_no` 不同的草稿——**这是可接受的（草稿可以被
+后续删除或直接被更高 `version_no` 的草稿取代），不视为数据损坏**。
+
+**事务边界**：单个 `connect()` 内"查询下一个 `version_no`" +
+"INSERT" + "回读"，整体在一个事务内完成。
+
+**影响范围**：`GET /api/compensation/grassroot/versions?period_month=`
+列表新增一条；不影响其他版本。
+
+#### 19.5.2 `PUT /api/compensation/grassroot/drafts/{version_id}`（更新草稿）
+
+对应 `update_compensation_draft()`。请求 body 同 19.5.1（去掉
+`period_month`，改为路径参数隐含）。
+
+**核心不变量（强制）**：仓储层 `UPDATE ... WHERE id = ? AND
+status = 'DRAFT'` —— **只有 `status=DRAFT` 的版本能被更新，
+`LOCKED` 版本的 `UPDATE` 会因 `WHERE` 条件不匹配而 `rowcount=0`**，
+API 层据此区分两种 404 语义：`version_id` 完全不存在，与
+`version_id` 存在但已 `LOCKED`（后者应返回更明确的错误）：
+
+| 状态 | code | 场景 |
+|---|---|---|
+| 404 | `NOT_FOUND` | `version_id` 不存在 |
+| 409 | `VERSION_LOCKED` | `version_id` 存在但 `status=LOCKED`，`message`："该结算版本已锁定，如需修正请创建新草稿"（对齐 19.5 全局不变量：LOCKED 版本永不可变） |
+| 422 | `VALIDATION_ERROR` | `jpy_to_usd_rate <= 0` |
+
+（实现时需要先查一次版本当前状态以区分 404 与 409，而不是仅凭
+`UPDATE` 的 `rowcount=0` 笼统返回 404——这是对仓储层当前
+"`rowcount != 1` 一律 `raise ValueError`"行为的 API 层细化包装，
+仓储层本身不需要改动。）
+
+**事务边界**：单条 `UPDATE`，天然原子。**并发**：`If-Unmodified-Since`
+可选支持（基于 `updated_at`）；即使不做乐观并发校验，`status=DRAFT`
+条件本身已经是一种"结构性并发保护"——一旦被锁定，后续更新自动失败。
+
+**影响范围**：同 19.5.1。
+
+#### 19.5.3 `POST /api/compensation/grassroot/drafts/{version_id}/lock`（锁定版本）
+
+对应 `lock_compensation_version()`。**请求 body（本契约定案，取代此前
+"无需额外字段"的表述）**：
+
+```json
+{ "lock_note": "7月草根结算，已核对无误，正式锁定" }
+```
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `lock_note` | string，**必填**，1–500 字符 | 锁定说明/备注，写入该结算版本记录（或其审计字段）；`lock_compensation_version()` 当前签名若未接收该字段，实现阶段需扩展参数以接收并落库——这是已确认的实现前置改造项 |
+
+**`operator_name` 绝不由客户端在请求体中传入或伪造**：锁定操作的
+操作人姓名一律从服务端 session 中自动读取（见 19.6.1/19.6.7 的
+`operator_name` 登录字段约定）并写入审计记录，**API 层必须显式忽略/
+拒绝请求体中任何试图传入 `operator_name`/`operator` 字段的尝试**（若
+出现此类字段，建议返回 422 `VALIDATION_ERROR` 而非静默忽略，防止
+客户端误以为自定义值会生效）。
+
+**核心不变量（最高优先级，贯穿全文档）**：**已 `LOCKED` 的结算版本
+永不改变，无论后续合同、汇率、投稿、粉丝数如何变化**——这是 19 章全部
+写接口共同遵守的红线：任何写接口都不得、也没有能力修改
+`status=LOCKED` 的 `grassroot_compensation_version`/
+`long_term_compensation_version`/`commentary_compensation_version`
+记录；发现数据需要修正时，**唯一合法路径是创建新草稿
+（19.5.1）→ 核对 → 再次锁定**，绝不「就地编辑已锁定版本」。
+
+**错误**：404（不存在）、422（`VALIDATION_ERROR`，`lock_note` 缺失/为空/
+超过 500 字符；或请求体中出现 `operator_name`/`operator` 字段，见上）、
+409（`VERSION_ALREADY_LOCKED`，重复锁定同一已锁定版本；对齐仓储层
+`rowcount != 1` 时机——即"该 `version_id` 当前不是 `DRAFT` 状态"，此时按
+"已锁定"与"不存在"两种可能细化为 404/409，处理方式同 19.5.2）。
+
+**幂等性**：**不建议依赖 `Idempotency-Key` 做防重复锁定**——`status`
+字段本身即是幂等保护：第二次锁定请求会因 `WHERE status='DRAFT'` 不
+匹配而失败并返回 409，天然防止"重复锁定"产生副作用；因此对
+"锁定"操作而言 409 恰好同时承担"已完成同一操作"的提示语义，前端应把
+409 + `VERSION_ALREADY_LOCKED` 展示为"该版本已锁定"而非报错阻断流程。
+
+**事务边界**：单条 `UPDATE`，天然原子。
+
+**影响范围**：该版本成为该月"最终"结算结果，前端所有引用该
+`period_month` 最新 `LOCKED` 版本的展示（例如结算历史列表、导出）需要
+刷新；**不影响其他月份或其他版本**；该版本一旦锁定即从此不再随 19.3
+（汇率/加成/活动数/主题申报）或 19.1/19.2/19.4
+（合同/投稿/粉丝数）的后续任何写操作而改变——这是因为
+`details_json`/`summary_json`/`jpy_to_usd_rate` 都是**创建草稿那一刻
+的完整快照**，不是对源表的引用。
+
+#### 19.5.4 长期赛道与评论区赛道的差异点
+
+- **长期**：`create_long_term_compensation_draft`/
+  `update_long_term_compensation_draft`/
+  `lock_long_term_compensation_version`
+  （`database/dashboard_repository.py:779/818/855`），路径前缀
+  `/api/compensation/long-term/...`，快照字段除
+  `details`/`summary`/`note` 外还需固化当月的
+  `traffic_boost_enabled`（19.3.2）与 `activity_counts`（19.3.3），
+  具体快照结构以仓储层方法签名为准，实现时需逐字段核对，本契约不
+  重复列出仓储层内部字段名。
+- **评论区**：`create_commentary_compensation_draft`/
+  `update_commentary_compensation_draft`/
+  `lock_commentary_compensation_version`
+  （`:1133/1177/1214`），路径前缀
+  `/api/compensation/commentary/...`，快照需固化当月的
+  `theme_submissions`（19.3.4）。
+  **指定主题规则（已获批准即计入奖励、只有匹配链接被排除计费）在快照
+  落库时必须按第 18 章定义的口径计算好再存入 `summary_json`，API 层
+  不在锁定时刻重新解释该规则**。
+- 三条赛道的 404/409/422 错误语义、`LOCKED` 不可变红线、
+  幂等/并发处理方式与 19.5.1–19.5.3 完全一致，不再重复列出。
+
+---
+
+### 19.6 通用写入安全（适用于本章全部写接口）
+
+#### 19.6.1 认证
+
+与读接口完全一致，依赖 `require_session`（`Depends(require_session)`，
+见 `api/main.py`，第一阶段第 14 章已定义 Cookie 规范）。写接口**不**
+引入额外的认证机制。
+
+**本契约定案（不再是占位方案）**：`POST /api/auth/login`（第一阶段第 2
+章）登录请求体在原有 `password` 基础上**新增必填字段
+`operator_name`（string，2–30 字符）**，与团队共享密码一并提交；服务端
+校验通过后，将 `operator_name` 与该次登录产生的 `session_id` 一并存入
+服务端 session 状态（沿用第 14 章已定义的 Cookie/session 机制，不新增
+认证渠道）。**本章全部高风险写操作的审计记录都必须包含 `operator_name`、
+`session_id`、时间戳、操作类型这四项**，取代此前 19.6.7 中"占位
+`operator: "team"`"的方案（详见 19.6.7）。**注**：由于本次编辑范围限定
+在第 19 章，`POST /api/auth/login` 所在的第 2 章正文本身的字段定义
+（当前仍写着 `{ "password": "string" }`，未包含 `operator_name`）需要
+在后续一并同步更新为要求 `operator_name`，此处先在第 19 章明确该
+登录字段变更的业务要求，具体第 2 章文本修订留待下一次编辑动作完成。
+
+#### 19.6.2 写接口禁止自动重试（硬性规则）
+
+`api/main.py` 中的 `DatabaseResilienceMiddleware` 明确写着"Bounded
+single retry for GET requests hit by a dead/lost DB connection"、
+"At most one retry is ever attempted (never a loop)"——**该中间件的
+自动重试逻辑当前只对幂等的只读 GET 生效**。本章新增的全部写接口
+（POST/PUT/PATCH/DELETE）**必须被排除在任何自动重试中间件之外**，
+无论现在还是将来：即便请求因网络中断等原因未确认成功，也绝不能由
+框架层自动重发一次写请求，因为写请求（尤其是月度导入的
+`replace_months`、结算版本锁定）重复执行的后果可能是不可逆的
+（数据被误删/误覆盖/误重复锁定报错）。**唯一允许的"重试"是由前端在
+明确知道上一次请求结果未知的情况下，携带相同 `Idempotency-Key`
+重新发起同一请求**（见 19.6.4），且这是应用层的显式重试，不是框架
+层的隐式自动重试。
+
+#### 19.6.3 事务与乐观并发
+
+- 每个写接口的多表操作必须在**同一个 `connect()` 事务**内完成
+  （复用现有仓储层方法自带的事务边界，API 层不得跨多次
+  `connect()` 调用拼凑一个"逻辑事务"）。
+- 对"编辑既有资源"类接口（19.1.2 达人资料编辑等），使用
+  `updated_at`（或等价 revision 字段）做乐观并发检测：客户端携带
+  `If-Unmodified-Since`（或 `If-Match` + 版本号），服务端比对后
+  发现被别人抢先修改则返回 `409 CONFLICT`。
+- 对"状态机迁移"类接口（19.5 草稿→锁定），`status` 字段本身就是
+  天然的并发保护（`WHERE status='DRAFT'` 条件不满足即失败），**不
+  需要额外的 `updated_at` 校验**，但仍需返回结构化的 409。
+- **"显著冲突"的判定按实体类型分别处理，不做统一的单一定义，且各自
+  返回各自专属的 409 业务 code（本契约定案）**：本章至少存在四类彼此
+  独立、互不复用的 409 场景，**每一类都必须使用自己专属的 code，而不是
+  统一塌缩成一个通用 `CONFLICT`**——
+  1. **合同周期重叠**：`(creator_id, effective_date)` 唯一性与区间重叠
+     判定（19.1.3/19.1.4），使用 `CONFLICT`（该类场景本身已足够具体，
+     由 `message` 区分"该月已有周期"/"周期重叠"两种子情形）；
+  2. **导入月份重叠**：并发 `replace_months` 命中同一 `period_months`
+     （19.2.2），使用 `CONFLICT`（`message`区分具体重叠月份）；
+  3. **结算版本状态冲突**：草稿更新/锁定命中非 `DRAFT` 状态
+     （19.5.2/19.5.3），使用 `VERSION_LOCKED`（更新一个已锁定草稿）与
+     `VERSION_ALREADY_LOCKED`（重复锁定）两个更具体的 code，不与上面的
+     通用 `CONFLICT` 混用；
+  4. **乐观锁/过期修订**：`If-Unmodified-Since`/`If-Match`/
+     `expected_updated_at`/`expected_revision` 过期（19.1.2、19.3.4、
+     结算修正相关场景），使用 `CONFLICT`（19.1.2）或
+     `REVISION_EXPIRED`（19.3.4，见该节）等按具体端点定义的专属 code。
+
+  粉丝更新与前置配置类"覆盖式保存"接口（19.3.1–19.3.4 中不涉及乐观锁的
+  部分、19.4）**不视为需要冲突检测的场景**（后写覆盖先写是预期行为）。
+  **上述四类划分是本次契约写作过程中做出的分类判断，产品侧确认后即为
+  最终设计，不再是开放问题。**
+
+**补充：重复提交与幂等冲突的组合处理（本契约定案，回应"合同修正重复
+提交"场景，同样适用于其余携带 `Idempotency-Key` 的高风险写接口）**
+
+同一操作若被前端因网络重试等原因提交多次，按以下优先级处理，三条规则
+不冲突、可同时生效：
+
+1. **相同 `Idempotency-Key` 的重复请求** → 直接返回服务端缓存的首次
+   成功结果（见 19.6.4 缓存机制），不重新执行业务逻辑，不产生新的
+   审计/修订记录。
+2. **请求内容与目标资源当前状态完全一致（无变化）** → 即使
+   `Idempotency-Key` 不同或未携带，只要服务端判定"本次提交的结果与
+   该资源当前状态相同"，返回 `200` 且响应体带 `no_change=true`
+   标记，**不创建新的修订/版本记录**（避免产生大量内容重复的审计
+   噪音）。此规则目前明确适用于 19.1.4 合同修正类"确认性重复提交"
+   场景，其余按"覆盖式保存"设计的端点（19.3.1–19.3.4）本身就是
+   幂等覆盖，天然满足同等效果，不需要单独实现 `no_change` 判定。
+3. **其余"不相同、也不是同一 `Idempotency-Key`"的旧/过期请求**
+   （例如基于过期数据构造的修正请求）→ 通过
+   `expected_updated_at`/`expected_revision` 等乐观并发字段判定，
+   命中则返回 409（见 19.6.3 第 4 类），不静默接受。
+
+#### 19.6.4 `Idempotency-Key`
+
+- 适用范围：19.2.2（导入确认）、19.1.3/19.1.4（合同变更/纠错）、19.1.6
+  （合同回退）、19.3.4（指定主题申报，全量替换场景）、19.5.1（创建
+  结算草稿，建议但非强制，因为重复创建是可接受的，见 19.5.1 说明）。
+  **不适用**：19.4（粉丝更新，抓取本身非确定性）、19.3.1/19.3.2/19.3.3
+  （覆盖式配置保存，天然幂等）、19.5.3（锁定，`status` 字段天然幂等）。
+- **服务端缓存机制（本契约定案，取代此前"方向性建议"的表述）**：
+  高风险写操作携带 `Idempotency-Key` 时，服务端按
+  **"操作类型 + `session_id` + `Idempotency-Key` + 请求体哈希"**
+  作为缓存键，缓存该键对应的**首次执行结果**（响应体与状态码），
+  **保留 24 小时**；24 小时内收到相同缓存键的重复请求，直接返回首次
+  缓存的结果，不重新执行任何数据库写入；超过 24 小时后同一
+  `Idempotency-Key` 再次出现，视为全新请求重新执行（不再命中缓存）。
+  请求体哈希纳入缓存键是为了防止"相同 `Idempotency-Key` 但请求体已
+  变化"被误判为重复请求——若命中相同缓存键但请求体哈希不一致，视为
+  客户端误用，应返回 422（`IDEMPOTENCY_KEY_REUSED`，`message` 提示
+  "该幂等键已用于不同的请求内容，请更换新的 Idempotency-Key"）。
+- **与数据库天然唯一约束的关系（本契约定案）**：`Idempotency-Key`
+  缓存机制与数据库层的自然业务唯一性约束（例如 `user_id` 唯一约束、
+  `(creator_id, effective_date)` 唯一约束、`(period_month, version_no)`
+  唯一约束等）是**两套独立生效、互不替代的机制**——前者解决"同一次
+  用户操作因网络重试被误发送多次"的请求层去重问题，后者解决"两个
+  不同来源的请求试图创建同一业务实体"的业务层去重问题。即使
+  服务端未收到 `Idempotency-Key`（或客户端未携带），数据库唯一约束
+  仍然独立生效并在冲突时触发 409；即使携带了
+  `Idempotency-Key`，数据库唯一约束检查依然按既有逻辑执行，不因
+  存在幂等缓存而被跳过。
+
+#### 19.6.5 预览/确认二步流程与缓存失效范围
+
+本章多个高风险写操作采用"预览（只读）→ 确认（写入）"两步模式
+（19.2.1→19.2.2 导入；19.5 的"预览接口→创建草稿"事实上也是同一模式的
+变体）。前端（Next.js + TanStack Query）实现时：
+
+- 预览请求的结果**不应该**被 TanStack Query 当作可长期缓存的
+  "服务器状态"缓存（`preview_token` 有 TTL，缓存过期即失效）。
+- 确认成功后，必须显式 `queryClient.invalidateQueries` 每个写接口
+  文档中"影响范围"一节列出的全部 query key，**不依赖自动
+  refetchOnWindowFocus 等隐式机制**兜底关键业务数据的一致性。
+- 每个写接口的"影响范围"小节即是该接口缓存失效范围的权威清单，
+  前端实现时应逐条对照。
+
+#### 19.6.6 统一错误信封
+
+写接口与读接口共用同一错误信封（第一阶段已定义）：
+
+```json
+{ "error": { "code": "string", "message": "string", "field_errors": {}, "request_id": "string" } }
+```
+
+写接口新增的状态码语义：
+
+| 状态 | code | 含义 |
+|---|---|---|
+| 404 | `NOT_FOUND` | 目标资源不存在 |
+| 409 | `CONFLICT` / 更具体的业务 code（如 `VERSION_LOCKED`、`VERSION_ALREADY_LOCKED`） | 并发冲突或状态机冲突 |
+| 422 | `VALIDATION_ERROR` | 请求体校验失败，透传仓储层 `ValueError` 消息到 `message`，字段级错误放入 `field_errors` |
+| 500 | `INTERNAL_ERROR` | 未预期的服务端异常 |
+
+**绝不**在 `message`/`field_errors` 中泄露数据库连接串、文件系统
+路径、堆栈跟踪等内部信息；仓储层抛出的 `ValueError` 消息本身即面向
+最终用户设计（均为中文业务提示），可直接透传，但**任何未捕获的
+异常都必须被统一异常处理器转换为不含技术细节的 `INTERNAL_ERROR`**。
+
+#### 19.6.7 审计归属（共享团队密码模型，本契约定案）
+
+**本契约定案（取代此前"占位方案，未最终拍板"的表述）**：登录时
+（`POST /api/auth/login`，见 19.6.1）新增必填 `operator_name`（2–30
+字符）字段，与 `session_id` 一并存入服务端 session。本章所有高风险
+写操作在其归属的审计/修订表（`creator_contract_revision`、
+`dashboard_import_batch`、`dashboard_import_batch_snapshot`、结算版本
+表的 `note`/审计字段等）中统一记录：
+
+```json
+{ "operator_name": "张三", "session_id": "sess_xxx", "created_at": "2026-07-01T10:00:00Z", "operation_type": "CONTRACT_CHANGE" }
+```
+
+即以 `operator_name`（自然人姓名，仅做标注不做身份校验）取代此前
+`operator="team"` 的占位值，`session_id` 仍保留用于区分同一会话内的
+连续操作；新增 `operation_type` 字段标注具体操作类型（如
+`CONTRACT_CHANGE`/`CONTRACT_CORRECTION`/`CONTRACT_REVERT`/`IMPORT`/
+`LOCK_VERSION` 等），便于审计检索。**`operator_name` 由服务端从 session
+中读取写入审计记录，客户端不得在具体写接口的请求体中传入/覆盖该字段**
+（与 19.5.3 锁定端点的约束一致）。
+
+### 19.7 待产品确认的业务决策汇总
+
+**本轮 12 项业务决策（共享密码审计、Idempotency-Key、409 细分 code、
+合同回退、已删除合同周期展示、导入批次真回滚、回退原因必填、重复合同
+修正提交、指定主题申报整月替换、粉丝批量更新异步化、结算版本唯一约束
+前置校验、锁定版本必填 `lock_note`）已全部确认并写入正文对应小节，
+**不再是开放问题**。以下为本轮编辑过程中新发现、仍需产品/工程进一步
+明确的残留事项：
+
+1. **仓储层方法签名扩展（实现前置，非语义开放问题）**：
+   `revert_contract_revision()`（19.1.6）需扩展以接收并落库 `reason`；
+   `lock_compensation_version()`/`lock_long_term_compensation_version()`/
+   `lock_commentary_compensation_version()`（19.5.3）需扩展以接收并落库
+   `lock_note`；`replace_commentary_theme_submissions()`（19.3.4）需扩展
+   以支持 `expected_revision` 乐观并发校验。三者语义已定案，只是需要在
+   实现阶段先改造 repository 方法签名，建议排入实现计划的最前置步骤。
+2. **导入批次快照存储的物理设计**（19.2.2/19.2.3）：本契约只定义了
+   "同事务保存旧数据快照、支持真回滚"的语义要求与建议表名
+   `dashboard_import_batch_snapshot`，具体表结构（例如是否需要按行
+   压缩存储、是否需要唯一索引）留待实现阶段设计，长期保留是否需要
+   容量归档策略也留待后续容量规划。
+3. **批量更新任务队列的物理实现**（19.4.3）：异步任务+轮询语义已
+   定案，但具体后台执行机制（线程池/独立 worker/任务队列中间件）
+   由实现阶段结合现有部署环境选型。
+4. **第 2 章 `POST /api/auth/login` 正文字段定义的同步修订**：本次
+   编辑范围限定在第 19 章，19.6.1 中已明确登录需新增必填
+   `operator_name` 字段的业务要求，但第 2 章正文当前仍写着
+   `{ "password": "string" }`，尚未反映该变化——需要在下一次允许跨
+   章节编辑时同步更新第 2 章正文，避免两章表述不一致。
+5. **TikTok "TT" 合同名称路由规则细节**（19.4 平台路由规则）：本轮未
+   涉及该规则的业务变更，维持第一版定义（合同类型文本含
+   `tt`/`tiktok` 视为持有 TikTok 合同），未来若命名规则需要调整，
+   需另行确认，与本轮 12 项决策无关。
+
+---
