@@ -7,7 +7,7 @@ import { DataTable, type Column } from "@/components/DataTable";
 import { StateShell } from "@/components/DataStates";
 import { creatorsApi, metaApi } from "@/lib/endpoints";
 import { fmtInt } from "@/lib/format";
-import type { Creator, ContractPeriod, CreatorDetail } from "@/lib/types";
+import type { Creator, ContractPeriod, CreatorDetail, ContractRevision } from "@/lib/types";
 import { ApiError } from "@/lib/api-client";
 
 /**
@@ -404,13 +404,21 @@ function CreatorDetailPanel({
   const [deleteTarget, setDeleteTarget] = useState<ContractPeriod | null>(null);
   const [deleteReason, setDeleteReason] = useState("");
   const [revertOpen, setRevertOpen] = useState(false);
-  const [revertRevisionId, setRevertRevisionId] = useState("");
-  const [revertReason, setRevertReason] = useState("");
+  const [revertReasons, setRevertReasons] = useState<Record<number, string>>({});
   const [panelError, setPanelError] = useState<string | null>(null);
+
+  const revisionsQuery = useQuery({
+    queryKey: ["creators", "contract-revisions", creatorId],
+    queryFn: () => creatorsApi.contractRevisions(creatorId),
+    enabled: showDeleted || revertOpen,
+  });
+  const revisions: ContractRevision[] = revisionsQuery.data?.data ?? [];
+  const deletedPeriodRevisions = revisions.filter((r) => r.is_deleted_period);
 
   function onWriteSuccess() {
     setPanelError(null);
     invalidateAffectedQueries(queryClient, creatorId);
+    queryClient.invalidateQueries({ queryKey: ["creators", "contract-revisions", creatorId] });
   }
   function onWriteError(err: unknown) {
     setPanelError(errorMessageOf(err));
@@ -449,11 +457,13 @@ function CreatorDetailPanel({
   const revertMutation = useMutation({
     mutationFn: ({ revisionId, reason }: { revisionId: number; reason: string }) =>
       creatorsApi.revertContractRevision(creatorId, revisionId, reason),
-    onSuccess: () => {
+    onSuccess: (_data, variables) => {
       onWriteSuccess();
-      setRevertOpen(false);
-      setRevertRevisionId("");
-      setRevertReason("");
+      setRevertReasons((prev) => {
+        const next = { ...prev };
+        delete next[variables.revisionId];
+        return next;
+      });
     },
     onError: onWriteError,
   });
@@ -572,48 +582,136 @@ function CreatorDetailPanel({
                 </tbody>
               </table>
               {showDeleted && (
-                <div style={{ marginTop: 8, color: "var(--color-text-muted)" }}>
-                  已删除记录的只读查询接口尚未提供（属于第一阶段的已知范围空缺），暂无法在此展示历史删除周期。
+                <div style={{ marginTop: 8 }}>
+                  <strong style={{ fontSize: 12.5 }}>已删除的合同周期</strong>
+                  <StateShell
+                    isLoading={revisionsQuery.isLoading}
+                    isError={revisionsQuery.isError}
+                    errorMessage={
+                      revisionsQuery.error instanceof ApiError ? revisionsQuery.error.message : undefined
+                    }
+                    isEmpty={deletedPeriodRevisions.length === 0}
+                  >
+                    <table style={{ width: "100%", marginTop: 6, fontSize: 12.5 }}>
+                      <thead>
+                        <tr>
+                          <th style={thCell}>修订ID</th>
+                          <th style={thCell}>受影响区间</th>
+                          <th style={thCell}>删除前周期</th>
+                          <th style={thCell}>原因</th>
+                          <th style={thCell}>删除时间</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {deletedPeriodRevisions.map((rev) => (
+                          <tr key={rev.id}>
+                            <td style={tdCell}>#{rev.id}</td>
+                            <td style={tdCell}>
+                              {rev.affected_start_date} ~ {rev.affected_end_date}
+                            </td>
+                            <td style={tdCell}>
+                              {rev.before_periods
+                                .map((p) =>
+                                  Array.isArray(p.contract_types) ? (p.contract_types as string[]).join("、") : ""
+                                )
+                                .filter(Boolean)
+                                .join("; ") || "—"}
+                            </td>
+                            <td style={tdCell}>{rev.reason ?? "—"}</td>
+                            <td style={tdCell}>{rev.created_at}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </StateShell>
                 </div>
               )}
             </div>
 
             {revertOpen && (
               <div style={{ ...panelStyle, background: "var(--color-warning-bg)" }}>
-                <strong>撤销最近一次合同修改</strong>
-                <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center", flexWrap: "wrap" }}>
-                  <input
-                    placeholder="修订记录 ID"
-                    value={revertRevisionId}
-                    onChange={(e) => setRevertRevisionId(e.target.value)}
-                    style={inputStyle}
-                  />
-                  <input
-                    placeholder="撤销原因（1-500 字符，必填）"
-                    value={revertReason}
-                    onChange={(e) => setRevertReason(e.target.value)}
-                    style={{ ...inputStyle, minWidth: 240 }}
-                  />
-                  <button
-                    type="button"
-                    style={dangerBtn}
-                    disabled={!revertRevisionId || !revertReason.trim() || revertReason.length > 500}
-                    onClick={() => {
-                      if (
-                        window.confirm(
-                          "这将撤销该达人最近一次未撤销的合同修改，并生成一条新的撤销记录；原记录不会被物理删除。确认继续？"
-                        )
-                      ) {
-                        revertMutation.mutate({
-                          revisionId: Number(revertRevisionId),
-                          reason: revertReason.trim(),
-                        });
-                      }
-                    }}
-                  >
-                    确认撤销
-                  </button>
-                </div>
+                <strong>合同修改历史 / 撤销</strong>
+                <StateShell
+                  isLoading={revisionsQuery.isLoading}
+                  isError={revisionsQuery.isError}
+                  errorMessage={
+                    revisionsQuery.error instanceof ApiError ? revisionsQuery.error.message : undefined
+                  }
+                  isEmpty={revisions.length === 0}
+                >
+                  <table style={{ width: "100%", marginTop: 8, fontSize: 12.5 }}>
+                    <thead>
+                      <tr>
+                        <th style={thCell}>修订ID</th>
+                        <th style={thCell}>类型</th>
+                        <th style={thCell}>原因</th>
+                        <th style={thCell}>时间</th>
+                        <th style={thCell}>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {revisions.map((rev) => (
+                        <tr key={rev.id}>
+                          <td style={tdCell}>#{rev.id}</td>
+                          <td style={tdCell}>{rev.operation_type}</td>
+                          <td style={tdCell}>{rev.reason ?? "—"}</td>
+                          <td style={tdCell}>{rev.created_at}</td>
+                          <td style={tdCell}>
+                            {rev.revertable ? (
+                              <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                                <input
+                                  placeholder="撤销原因（1-500 字符，必填）"
+                                  value={revertReasons[rev.id] ?? ""}
+                                  onChange={(e) =>
+                                    setRevertReasons((prev) => ({ ...prev, [rev.id]: e.target.value }))
+                                  }
+                                  style={{ ...inputStyle, minWidth: 200 }}
+                                />
+                                <button
+                                  type="button"
+                                  style={dangerBtn}
+                                  disabled={
+                                    !(revertReasons[rev.id] ?? "").trim() ||
+                                    (revertReasons[rev.id] ?? "").length > 500
+                                  }
+                                  onClick={() => {
+                                    const reason = (revertReasons[rev.id] ?? "").trim();
+                                    if (
+                                      window.confirm(
+                                        "这将撤销该达人最近一次未撤销的合同修改，并生成一条新的撤销记录；原记录不会被物理删除。确认继续？"
+                                      )
+                                    ) {
+                                      revertMutation.mutate({ revisionId: rev.id, reason });
+                                    }
+                                  }}
+                                >
+                                  回退
+                                </button>
+                              </div>
+                            ) : (
+                              <span
+                                style={{ color: "var(--color-text-muted)" }}
+                                title={
+                                  rev.status === "REVERTED"
+                                    ? "该修改已被撤销，无法再次撤销"
+                                    : rev.status === "REVERT_RECORD"
+                                      ? "撤销记录本身不可再次撤销"
+                                      : "只能撤销该达人最近一次未撤销的合同修改"
+                                }
+                              >
+                                {rev.status === "REVERTED"
+                                  ? "已回退"
+                                  : rev.status === "REVERT_RECORD"
+                                    ? "回退记录不可回退"
+                                    : "不可回退"}
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </StateShell>
               </div>
             )}
           </div>

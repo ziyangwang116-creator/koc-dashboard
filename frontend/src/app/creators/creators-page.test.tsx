@@ -68,6 +68,60 @@ const revertContractRevisionMock = vi.fn(async (_id: number, _revisionId: number
   data: detailResponse.data,
 }));
 
+const revisionsResponse = {
+  data: [
+    {
+      id: 5,
+      creator_id: 1,
+      operation_type: "CHANGE",
+      before_periods: [],
+      after_periods: [{ contract_types: ["YTB", "TT"] }],
+      affected_start_date: "2026-06-01",
+      affected_end_date: "2026-10-31",
+      reason: "新增合同变更",
+      reverted_revision_id: null,
+      reverted_at: null,
+      created_at: "2026-06-01T00:00:00Z",
+      is_deleted_period: false,
+      revertable: true,
+      status: "REVERTABLE",
+    },
+    {
+      id: 3,
+      creator_id: 1,
+      operation_type: "DELETE",
+      before_periods: [{ contract_types: ["TT"], start_date: "2025-05-01", end_date: "2025-10-31" }],
+      after_periods: [],
+      affected_start_date: "2025-05-01",
+      affected_end_date: "2025-10-31",
+      reason: "清除多余周期",
+      reverted_revision_id: null,
+      reverted_at: null,
+      created_at: "2025-05-01T00:00:00Z",
+      is_deleted_period: true,
+      revertable: false,
+      status: "SUPERSEDED",
+    },
+    {
+      id: 2,
+      creator_id: 1,
+      operation_type: "CHANGE",
+      before_periods: [],
+      after_periods: [{ contract_types: ["TT"] }],
+      affected_start_date: "2025-05-01",
+      affected_end_date: "2025-10-31",
+      reason: null,
+      reverted_revision_id: 4,
+      reverted_at: "2026-01-02T00:00:00Z",
+      created_at: "2025-05-01T00:00:00Z",
+      is_deleted_period: false,
+      revertable: false,
+      status: "REVERTED",
+    },
+  ],
+};
+const contractRevisionsMock = vi.fn(async (_id: number) => revisionsResponse);
+
 vi.mock("@/lib/endpoints", () => ({
   creatorsApi: {
     list: (...args: Parameters<typeof listMock>) => listMock(...args),
@@ -82,6 +136,7 @@ vi.mock("@/lib/endpoints", () => ({
       deleteContractPeriodMock(...args),
     revertContractRevision: (...args: Parameters<typeof revertContractRevisionMock>) =>
       revertContractRevisionMock(...args),
+    contractRevisions: (...args: Parameters<typeof contractRevisionsMock>) => contractRevisionsMock(...args),
   },
   metaApi: { contractTypes: vi.fn(async () => ({ data: { contract_types: ["YTB", "TT"] } })) },
   authApi: { logout: vi.fn(async () => ({ data: { authenticated: false } })) },
@@ -98,6 +153,7 @@ beforeEach(() => {
   createContractCorrectionMock.mockClear();
   deleteContractPeriodMock.mockClear();
   revertContractRevisionMock.mockClear();
+  contractRevisionsMock.mockClear();
 });
 
 describe("CreatorsPage", () => {
@@ -194,7 +250,7 @@ describe("CreatorsPage", () => {
     await waitFor(() => expect(deleteContractPeriodMock).toHaveBeenCalledTimes(1));
   });
 
-  it("requires a 1-500 char reason before enabling the revert action", async () => {
+  it("requires a 1-500 char reason before enabling the per-row revert button", async () => {
     const user = userEvent.setup();
     renderWithQueryClient(<CreatorsPage />);
     await waitFor(() => expect(screen.getByText("示例达人")).toBeInTheDocument());
@@ -202,19 +258,50 @@ describe("CreatorsPage", () => {
     await screen.findByText("合同周期");
 
     await user.click(screen.getByRole("button", { name: "撤销历史修改…" }));
-    const confirmRevertBtn = screen.getByRole("button", { name: "确认撤销" });
-    expect(confirmRevertBtn).toBeDisabled();
+    await waitFor(() => expect(contractRevisionsMock).toHaveBeenCalledWith(1));
 
-    await user.type(screen.getByPlaceholderText("修订记录 ID"), "5");
-    expect(confirmRevertBtn).toBeDisabled();
+    await screen.findByText("#5");
+    const revertBtn = screen.getByRole("button", { name: "回退" });
+    expect(revertBtn).toBeDisabled();
 
     await user.type(screen.getByPlaceholderText("撤销原因（1-500 字符，必填）"), "录入时误选了合同类型");
-    expect(confirmRevertBtn).toBeEnabled();
+    expect(revertBtn).toBeEnabled();
 
     vi.spyOn(window, "confirm").mockReturnValue(true);
-    await user.click(confirmRevertBtn);
+    await user.click(revertBtn);
 
     await waitFor(() => expect(revertContractRevisionMock).toHaveBeenCalledTimes(1));
     expect(revertContractRevisionMock).toHaveBeenCalledWith(1, 5, "录入时误选了合同类型");
+  });
+
+  it("shows already-reverted and non-revertable rows as disabled with an explanation", async () => {
+    const user = userEvent.setup();
+    renderWithQueryClient(<CreatorsPage />);
+    await waitFor(() => expect(screen.getByText("示例达人")).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "查看详情" }));
+    await screen.findByText("合同周期");
+
+    await user.click(screen.getByRole("button", { name: "撤销历史修改…" }));
+    await screen.findByText("#2");
+
+    expect(screen.getByText("已回退")).toBeInTheDocument();
+    // Only the single revertable revision (#5) renders an actionable button.
+    expect(screen.getAllByRole("button", { name: "回退" })).toHaveLength(1);
+  });
+
+  it("renders real deleted contract periods when the toggle is switched on", async () => {
+    const user = userEvent.setup();
+    renderWithQueryClient(<CreatorsPage />);
+    await waitFor(() => expect(screen.getByText("示例达人")).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "查看详情" }));
+    await screen.findByText("合同周期");
+
+    expect(screen.queryByText("已删除的合同周期")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("checkbox", { name: /显示已删除记录/ }));
+
+    await waitFor(() => expect(contractRevisionsMock).toHaveBeenCalledWith(1));
+    await screen.findByText("已删除的合同周期");
+    expect(screen.getByText("清除多余周期")).toBeInTheDocument();
   });
 });

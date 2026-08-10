@@ -659,6 +659,100 @@ def test_revert_contract_revision_non_latest_returns_409(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# 7b. GET /api/creators/{id}/contract-revisions
+# ---------------------------------------------------------------------------
+
+
+def test_list_contract_revisions_returns_mixed_operation_types_with_flags(tmp_path):
+    database_path = tmp_path / "koc.db"
+    repository, record = _seed_creator(database_path)
+    client = _authenticated_client(database_path)
+
+    repository.create_contract_change(
+        record.id,
+        effective_date="2026-09-01",
+        contract_types=["TT", "YTB"],
+        contract_end_date="2026-10-31",
+        reason="新增YTB合同",
+    )
+    repository.correct_contract_period(
+        record.id,
+        source_effective_date="2026-09-01",
+        contract_types=["YTB"],
+        contract_start_date="2026-09-01",
+        contract_end_date="2026-10-31",
+        reason="录入错误更正",
+    )
+    repository.delete_authoritative_contract_period(
+        record.id,
+        source_effective_date=record.contract_start_date.isoformat(),
+        reason="清除多余周期",
+    )
+    revisions_before = repository.list_contract_revisions(record.id)
+    latest_change = max(
+        (r for r in revisions_before if r.operation_type == "CHANGE"),
+        key=lambda r: r.id,
+    )
+    # The only revertable revision is the most recent un-reverted, non-REVERT
+    # one; here that's the DELETE — revert it to also exercise REVERT rows.
+    client.post(
+        f"/api/creators/{record.id}/contract-revisions/"
+        f"{max(revisions_before, key=lambda r: r.id).id}/revert",
+        json={"reason": "撤销删除，恢复周期"},
+    )
+
+    response = client.get(f"/api/creators/{record.id}/contract-revisions")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    operation_types = {row["operation_type"] for row in data}
+    assert {"CHANGE", "CORRECTION", "DELETE", "REVERT"} <= operation_types
+
+    delete_rows = [row for row in data if row["operation_type"] == "DELETE"]
+    assert delete_rows, "expected the deleted contract period to be present"
+    assert all(row["is_deleted_period"] is True for row in delete_rows)
+    assert all(row["revertable"] is False for row in delete_rows)
+    assert all(row["status"] == "REVERTED" for row in delete_rows)
+
+    revert_rows = [row for row in data if row["operation_type"] == "REVERT"]
+    assert revert_rows
+    assert all(row["revertable"] is False for row in revert_rows)
+    assert all(row["status"] == "REVERT_RECORD" for row in revert_rows)
+
+    # Snapshot content: before/after periods survive the round trip.
+    change_row = next(row for row in data if row["id"] == latest_change.id)
+    assert change_row["before_periods"] == list(latest_change.before_periods)
+    assert change_row["after_periods"] == list(latest_change.after_periods)
+    assert change_row["reason"] == "录入错误更正" or change_row["reason"] == "新增YTB合同"
+
+    revertable_rows = [row for row in data if row["revertable"] is True]
+    assert len(revertable_rows) == 1
+    assert revertable_rows[0]["status"] == "REVERTABLE"
+
+
+def test_list_contract_revisions_not_found_returns_404(tmp_path):
+    database_path = tmp_path / "koc.db"
+    KOCRepository(database_path)
+    client = _authenticated_client(database_path)
+
+    response = client.get("/api/creators/999999/contract-revisions")
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "NOT_FOUND"
+
+
+def test_list_contract_revisions_requires_authentication(tmp_path):
+    database_path = tmp_path / "koc.db"
+    _, record = _seed_creator(database_path)
+    app = create_app(_settings(database_path), environment="development")
+    client = TestClient(app)
+
+    response = client.get(f"/api/creators/{record.id}/contract-revisions")
+
+    assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
 # 8. LOCKED settlement versions must never be touched by creator/contract writes
 # ---------------------------------------------------------------------------
 

@@ -9,7 +9,11 @@ from database.koc_repository import DuplicateUserIDError, KOCRepository, KOCRepo
 from models.enums import CreatorCategory, FollowerSource, FollowerSyncStatus
 
 from api.idempotency import IdempotencyCache
-from api.serializers import serialize_creator_detail, serialize_creator_summary
+from api.serializers import (
+    serialize_contract_revision,
+    serialize_creator_detail,
+    serialize_creator_summary,
+)
 
 ACTIVE_VALUES = {"all", "true", "false"}
 SORT_WHITELIST = {"updated_at", "-updated_at", "koc_name", "-koc_name", "id", "-id"}
@@ -53,6 +57,34 @@ def _map_repository_error(exc: KOCRepositoryError) -> HTTPException:
     if any(marker in message for marker in _CONFLICT_MARKERS):
         return _conflict_error(message)
     return _validation_error(message)
+
+
+def _annotate_revisions(revisions: list) -> list[dict]:
+    """Flag each revision with its revert eligibility, per revert_contract_revision()'s
+    "only the latest un-reverted, non-REVERT revision can be reverted" rule
+    (see database/koc_repository.py revert_contract_revision)."""
+    latest_revertable_id = max(
+        (
+            revision.id
+            for revision in revisions
+            if revision.operation_type != "REVERT" and revision.reverted_at is None
+        ),
+        default=None,
+    )
+    annotated: list[dict] = []
+    for revision in revisions:
+        if revision.operation_type == "REVERT":
+            revertable, status = False, "REVERT_RECORD"
+        elif revision.reverted_at is not None:
+            revertable, status = False, "REVERTED"
+        elif revision.id == latest_revertable_id:
+            revertable, status = True, "REVERTABLE"
+        else:
+            revertable, status = False, "SUPERSEDED"
+        annotated.append(
+            serialize_contract_revision(revision, revertable=revertable, status=status)
+        )
+    return annotated
 
 
 def _clean_body_contract_types(payload: dict, field: str = "contract_types") -> list[str]:
@@ -226,6 +258,15 @@ def build_creators_router(
             raise _not_found_error(f"未找到 id={creator_id} 的达人。")
         contract_periods = repository.list_contract_periods(creator_id)
         return {"data": serialize_creator_detail(record, contract_periods)}
+
+    @router.get("/api/creators/{creator_id}/contract-revisions")
+    def list_contract_revisions(creator_id: int) -> dict:
+        repository = _repository()
+        record = repository.get(creator_id)
+        if record is None:
+            raise _not_found_error(f"未找到 id={creator_id} 的达人。")
+        revisions = repository.list_contract_revisions(creator_id, limit=2_000)
+        return {"data": _annotate_revisions(revisions)}
 
     # -------------------------------------------------------------------
     # Write endpoints (19.1) — API layer only validates input and calls the

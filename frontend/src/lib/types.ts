@@ -55,6 +55,23 @@ export interface ContractPeriod {
   updated_at: string;
 }
 
+export interface ContractRevision {
+  id: number;
+  creator_id: number;
+  operation_type: "CHANGE" | "CORRECTION" | "DELETE" | "REVERT";
+  before_periods: Record<string, unknown>[];
+  after_periods: Record<string, unknown>[];
+  affected_start_date: string | null;
+  affected_end_date: string | null;
+  reason: string | null;
+  reverted_revision_id: number | null;
+  reverted_at: string | null;
+  created_at: string;
+  is_deleted_period: boolean;
+  revertable: boolean;
+  status: "REVERTABLE" | "REVERTED" | "REVERT_RECORD" | "SUPERSEDED";
+}
+
 export interface CreatorDetail extends Creator {
   follower_error_code: string | null;
   follower_sync_error: string | null;

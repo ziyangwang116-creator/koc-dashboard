@@ -2,6 +2,7 @@ import { apiClient, type WriteOptions } from "./api-client";
 import type {
   Creator,
   CreatorDetail,
+  ContractRevision,
   FilterOptions,
   DashboardSummaryRow,
   DashboardPostRow,
@@ -86,6 +87,8 @@ export const creatorsApi = {
       undefined,
       options
     ),
+  contractRevisions: (id: number) =>
+    apiClient.get<{ data: ContractRevision[] }>(`/creators/${id}/contract-revisions`),
 };
 
 export const dashboardApi = {

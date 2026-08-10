@@ -4,7 +4,7 @@ from datetime import date
 from enum import Enum
 from typing import Any
 
-from models.koc import CreatorContractPeriod, KOCRecord
+from models.koc import CreatorContractPeriod, CreatorContractRevision, KOCRecord
 
 
 def _enum_value(value: Any) -> Any:
@@ -59,6 +59,30 @@ def serialize_contract_period(period: CreatorContractPeriod) -> dict:
         "contract_end_date": _date_str(period.contract_end_date),
         "created_at": period.created_at,
         "updated_at": period.updated_at,
+    }
+
+
+def serialize_contract_revision(
+    revision: CreatorContractRevision,
+    *,
+    revertable: bool,
+    status: str,
+) -> dict:
+    return {
+        "id": revision.id,
+        "creator_id": revision.creator_id,
+        "operation_type": revision.operation_type,
+        "before_periods": list(revision.before_periods),
+        "after_periods": list(revision.after_periods),
+        "affected_start_date": _date_str(revision.affected_start_date),
+        "affected_end_date": _date_str(revision.affected_end_date),
+        "reason": revision.reason,
+        "reverted_revision_id": revision.reverted_revision_id,
+        "reverted_at": revision.reverted_at,
+        "created_at": revision.created_at,
+        "is_deleted_period": revision.operation_type == "DELETE",
+        "revertable": revertable,
+        "status": status,
     }
 
 

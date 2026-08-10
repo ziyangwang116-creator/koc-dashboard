@@ -2058,6 +2058,25 @@ REVERT 修订记录（含必填的 `reason`）、更新原修订记录的
 历史查询，见第一阶段第 5 节暂缺此接口，属于后续只读接口补充范围）会立即
 反映回滚结果。
 
+#### 19.1.7 `GET /api/creators/{id}/contract-revisions`（只读修订历史，补齐 19.1.5/19.1.6 遗留缺口）
+
+只读接口，复用 `list_contract_revisions()` 已有存储的
+`creator_contract_revision` 记录，不引入新的业务写逻辑。返回该达人全部
+修订记录（`CHANGE`/`CORRECTION`/`DELETE`/`REVERT`），按 `id` 倒序，每条包含
+`before_periods`/`after_periods` 快照、`affected_start_date`/
+`affected_end_date`、`reason`、`reverted_revision_id`、`reverted_at`、
+`created_at`，并额外附带两个前端判定用字段：
+
+| 字段 | 说明 |
+|---|---|
+| `is_deleted_period` | `operation_type == 'DELETE'` 时为 `true`，供"显示已删除记录"开关识别并展示 19.1.5 删除的历史周期 |
+| `revertable` | 是否可通过 19.1.6 撤销——与 `revert_contract_revision()` 的"只能撤销最近一次未撤销、非 REVERT 的修改"规则完全一致（服务端计算，前端不得自行判断） |
+| `status` | `REVERTABLE`/`REVERTED`/`REVERT_RECORD`/`SUPERSEDED` 之一，供前端在不可回退的记录上显示对应的disabled说明文案 |
+
+**错误**：404（达人不存在）、401（未登录）沿用统一错误信封。
+
+**影响范围**：只读，无写入；供"显示已删除记录"开关与逐行"回退"按钮消费。
+
 ---
 
 ### 19.2 投稿与导入
