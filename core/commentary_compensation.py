@@ -91,25 +91,6 @@ COMMENTARY_COLUMNS = [
     "CPM",
 ]
 
-VALIDITY_COLUMNS = [
-    "creator_id",
-    "达人",
-    "投稿日期",
-    "平台",
-    "视频类型",
-    "标题",
-    "URL",
-    "原始播放量",
-    "点赞率",
-    "播放/粉丝倍数",
-    "平均观看率",
-    "近3月单条平均播放量",
-    "有效播放比例",
-    "审核状态",
-    "审核说明",
-]
-
-
 @dataclass(frozen=True)
 class CommentaryCompensationResult:
     details: pd.DataFrame
@@ -149,14 +130,6 @@ def _int(value: object) -> int:
         return max(int(numeric), 0)
     except (TypeError, ValueError):
         return 0
-
-
-def _float(value: object) -> float | None:
-    try:
-        numeric = pd.to_numeric(value, errors="coerce")
-        return None if pd.isna(numeric) else float(numeric)
-    except (TypeError, ValueError):
-        return None
 
 
 def _active(value: object) -> bool:
@@ -358,122 +331,6 @@ def _settlement_content_views(
         elif _is_short(source, mode):
             short_views += _int(source.get("views"))
     return long_views, short_views
-
-
-def build_commentary_validity_review(
-    data: pd.DataFrame,
-    *,
-    overrides: Mapping[str, Mapping[str, Any]] | None = None,
-    excluded_theme_urls: Iterable[str] = (),
-) -> pd.DataFrame:
-    overrides = overrides or {}
-    excluded = {_text(url) for url in excluded_theme_urls if _text(url)}
-    rows: list[dict[str, Any]] = []
-    for source in data.to_dict("records"):
-        mode = commentary_contract_mode(source.get("contract_types"))
-        if mode is None or not _row_within_contract(source):
-            continue
-        url = _text(source.get("url"))
-        if not url or url in excluded:
-            continue
-        is_long = _is_long(source)
-        is_short = _is_short(source, mode)
-        if not is_long and not is_short:
-            continue
-        views = _int(source.get("views"))
-        likes = _int(source.get("likes"))
-        like_rate = likes / views if views > 0 else 0.0
-        platform = "YouTube" if is_long or mode == "YTB_LONG_YTB_SHORTS" else "TikTok"
-        follower_column = (
-            "youtube_follower_count" if platform == "YouTube" else "tiktok_follower_count"
-        )
-        followers = _float(source.get(follower_column))
-        if followers is None:
-            followers = _float(source.get("follower_count"))
-        follower_multiple = views / followers if followers and followers > 0 else None
-        override = overrides.get(url, {})
-        review_status = _text(override.get("review_status")).upper()
-        ratio = _float(override.get("valid_ratio"))
-        average_watch_rate = _float(override.get("average_watch_rate"))
-        recent_average = _float(override.get("recent_three_month_average"))
-        reason = _text(override.get("reason"))
-
-        follower_spike_limit = 5 if is_long else 10
-        suspicious_follower_spike = (
-            follower_multiple is not None
-            and follower_multiple > follower_spike_limit
-        )
-        suspicious_history_spike = (
-            recent_average is not None
-            and recent_average > 0
-            and views > recent_average * 5
-        )
-        suspicious_spike = suspicious_follower_spike or suspicious_history_spike
-        if not review_status:
-            if is_long:
-                if average_watch_rate is None:
-                    review_status = "PENDING"
-                    ratio = 0.0 if ratio is None else ratio
-                    reason = reason or "请填写平均观看率后审核有效播放比例。"
-                elif average_watch_rate >= 0.2 and not suspicious_spike:
-                    review_status = "AUTO"
-                    ratio = 1.0
-                    reason = reason or "平均观看率达到20%，自动全额计入。"
-                elif average_watch_rate < 0.1 and like_rate < 0.005:
-                    review_status = "PENDING"
-                    ratio = 0.0
-                    reason = reason or "平均观看率低于10%且点赞率低于0.5%，原则不计入。"
-                elif average_watch_rate < 0.1:
-                    review_status = "PENDING"
-                    ratio = 0.5 if ratio is None else ratio
-                    reason = reason or "平均观看率低于10%，原则按50%换算。"
-                else:
-                    review_status = "PENDING"
-                    ratio = 0.6 if ratio is None else ratio
-                    reason = reason or "平均观看率低于20%，请在50%-70%间确认。"
-            elif like_rate >= 0.005 and not suspicious_spike:
-                review_status = "AUTO"
-                ratio = 1.0
-                reason = reason or "点赞率达到0.5%，自动全额计入。"
-            else:
-                review_status = "PENDING"
-                if ratio is None:
-                    ratio = 0.6 if is_short and like_rate >= 0.003 else 0.0
-                reason = reason or (
-                    "点赞率在0.3%-0.5%，请在50%-70%间确认。"
-                    if like_rate >= 0.003
-                    else "点赞率低于0.3%或播放增长异常，请核对评论、分享和内容有效性。"
-                )
-            if suspicious_spike and review_status == "AUTO":
-                review_status = "PENDING"
-            if suspicious_spike:
-                reason = reason or "播放量超过粉丝或近3月均值的审核阈值。"
-        if review_status == "REJECTED":
-            ratio = 0.0
-        if ratio not in {0.0, 0.5, 0.6, 0.7, 1.0}:
-            ratio = 0.0
-            review_status = "PENDING"
-
-        rows.append(
-            {
-                "creator_id": _int(source.get("creator_id")),
-                "达人": _text(source.get("koc_name") or source.get("kol_name")),
-                "投稿日期": source.get("publish_date"),
-                "平台": platform,
-                "视频类型": "长视频" if is_long else "短视频",
-                "标题": _text(source.get("title")),
-                "URL": url,
-                "原始播放量": views,
-                "点赞率": like_rate,
-                "播放/粉丝倍数": follower_multiple,
-                "平均观看率": average_watch_rate,
-                "近3月单条平均播放量": recent_average,
-                "有效播放比例": ratio,
-                "审核状态": review_status,
-                "审核说明": reason,
-            }
-        )
-    return pd.DataFrame(rows, columns=VALIDITY_COLUMNS)
 
 
 def calculate_commentary_compensation(
