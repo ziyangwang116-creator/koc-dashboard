@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import logging
 import os
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from config.settings import Settings, load_settings
-from database.db import is_postgres_target
+from database.db import CONNECTION_LOST_ERRORS, is_postgres_target, sanitize_db_error_marker
 from ui.auth import password_matches
 
 from api.compensation import build_compensation_router
@@ -17,6 +19,109 @@ from api.session_store import SessionStore
 
 SESSION_COOKIE_NAME = "koc_session"
 SESSION_MAX_AGE_SECONDS = 28800
+
+logger = logging.getLogger("api.db_resilience")
+
+GENERIC_ERROR_RESPONSE = {
+    "error": {"code": "INTERNAL_ERROR", "message": "服务器内部错误，请稍后重试。"}
+}
+
+
+class DatabaseResilienceMiddleware:
+    """Bounded single retry for GET requests hit by a dead/lost DB connection.
+
+    Every request in this app opens its own connection (or pool checkout),
+    so a plain retry of the whole request is enough to pick up a fresh,
+    live connection after psycopg reports the previous one as lost/closed.
+    This middleware operates at the raw ASGI level (not `@app.middleware`'s
+    `BaseHTTPMiddleware`) because that helper's `call_next` is single-use per
+    request and cannot safely be invoked twice.
+
+    Rules enforced here:
+    - Only GET requests are retried. POST/PUT/DELETE are never retried.
+    - At most one retry is ever attempted (never a loop).
+    - On persistent failure, the existing generic unified 500 error is
+      returned; only the exception class name is logged, never exception
+      text (which for driver errors can embed connection details).
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        method = scope.get("method", "GET")
+
+        # Buffer receive() messages so a retry can replay the same request
+        # body (empty for GET) instead of re-reading an exhausted stream.
+        buffered_messages: list[Message] = []
+        buffer_index = 0
+
+        async def recording_receive() -> Message:
+            message = await receive()
+            buffered_messages.append(message)
+            return message
+
+        async def replaying_receive() -> Message:
+            nonlocal buffer_index
+            if buffer_index < len(buffered_messages):
+                message = buffered_messages[buffer_index]
+                buffer_index += 1
+                return message
+            return await receive()
+
+        async def attempt(receive_fn: Receive) -> None:
+            await self.app(scope, receive_fn, send)
+
+        try:
+            await attempt(recording_receive)
+            return
+        except CONNECTION_LOST_ERRORS as exc:
+            if method != "GET":
+                logger.error("database connection error: %s", sanitize_db_error_marker(exc))
+                await _send_generic_500(send)
+                return
+            logger.warning(
+                "database connection error, retrying once: %s", sanitize_db_error_marker(exc)
+            )
+        except Exception as exc:  # noqa: BLE001 - unified generic 500 boundary
+            if isinstance(exc, HTTPException):
+                raise
+            logger.error("unhandled request error: %s", sanitize_db_error_marker(exc))
+            await _send_generic_500(send)
+            return
+
+        # Exactly one bounded retry, GET only. Never loops further: any
+        # failure here — connection-lost or otherwise — becomes the final
+        # generic 500 response.
+        try:
+            await attempt(replaying_receive)
+        except CONNECTION_LOST_ERRORS as retry_exc:
+            logger.error(
+                "database connection error, retry failed: %s",
+                sanitize_db_error_marker(retry_exc),
+            )
+            await _send_generic_500(send)
+        except Exception as retry_exc:  # noqa: BLE001
+            if isinstance(retry_exc, HTTPException):
+                raise
+            logger.error(
+                "unhandled request error after retry: %s",
+                sanitize_db_error_marker(retry_exc),
+            )
+            await _send_generic_500(send)
+
+
+async def _send_generic_500(send: Send) -> None:
+    response = JSONResponse(status_code=500, content=GENERIC_ERROR_RESPONSE)
+    await response({"type": "http"}, _no_op_receive, send)
+
+
+async def _no_op_receive() -> Message:
+    return {"type": "http.disconnect"}
 
 
 class LoginRequest(BaseModel):
@@ -31,6 +136,7 @@ def create_app(settings: Settings | None = None, *, environment: str | None = No
     session_store = SessionStore(ttl_seconds=SESSION_MAX_AGE_SECONDS)
 
     app = FastAPI(title="KOC Dashboard API")
+    app.add_middleware(DatabaseResilienceMiddleware)
 
     @app.exception_handler(HTTPException)
     async def _http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:

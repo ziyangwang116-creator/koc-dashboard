@@ -237,10 +237,36 @@ def _postgres_pool(database_url: str) -> Any:
                     "row_factory": _postgres_row_factory,
                     "prepare_threshold": None,
                 },
+                # Liveness check before handing out a pooled connection, plus
+                # bounded lifetime/idle recycling, so a stale/dropped server-side
+                # connection is detected and replaced instead of surfacing as an
+                # opaque failure on first use.
+                check=ConnectionPool.check_connection,
+                max_lifetime=1800.0,
+                max_idle=300.0,
                 open=True,
             )
             _POSTGRES_POOLS[normalized] = pool
         return pool
+
+
+# Exceptions that indicate the underlying connection is dead/lost rather than
+# a query-level error (bad SQL, constraint violation, etc.). These are the
+# only errors eligible for the single bounded read-retry in the API layer.
+if psycopg is None:
+    CONNECTION_LOST_ERRORS: tuple[type[BaseException], ...] = ()
+else:
+    CONNECTION_LOST_ERRORS = (psycopg.OperationalError, psycopg.InterfaceError)
+
+
+def sanitize_db_error_marker(exc: BaseException) -> str:
+    """Return a safe, non-identifying marker for logging a DB error.
+
+    Never returns str(exc): driver exceptions (e.g. psycopg connection
+    errors) can embed the DSN, host, user, or SQL text. Only the exception
+    class name is safe to log.
+    """
+    return type(exc).__name__
 
 
 if psycopg is None:
