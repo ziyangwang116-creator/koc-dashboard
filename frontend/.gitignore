@@ -39,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# real live-data screenshots must never be committed
+e2e-screenshots-live/
+!.env.local.example
