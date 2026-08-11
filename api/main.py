@@ -15,6 +15,7 @@ from ui.auth import password_matches
 from api.compensation import build_compensation_router
 from api.creators import build_creators_router
 from api.dashboard import build_dashboard_router
+from api.followers import build_followers_router
 from api.imports import build_imports_router
 from api.session_store import SessionStore
 
@@ -130,8 +131,19 @@ class LoginRequest(BaseModel):
     operator_name: str | None = None
 
 
-def create_app(settings: Settings | None = None, *, environment: str | None = None) -> FastAPI:
-    """Build the FastAPI app. Phase 1: read-only endpoints + session auth only."""
+def create_app(
+    settings: Settings | None = None,
+    *,
+    environment: str | None = None,
+    followers_service_factory=None,
+) -> FastAPI:
+    """Build the FastAPI app. Phase 1: read-only endpoints + session auth only.
+
+    `followers_service_factory` lets tests substitute a `FollowerService`
+    wired with stub providers so the batch-update job endpoints never touch
+    the real network; production callers leave it unset and get the real
+    YouTube/TikTok providers wired from `resolved_settings`.
+    """
     resolved_settings = settings or load_settings()
     resolved_environment = environment or os.environ.get("APP_ENV", "development")
     secure_cookie = resolved_environment != "development"
@@ -177,6 +189,7 @@ def create_app(settings: Settings | None = None, *, environment: str | None = No
     compensation_router = build_compensation_router(
         database_path=resolved_settings.database_path,
         require_session=Depends(require_session),
+        session_context=Depends(get_session_context),
     )
     app.include_router(compensation_router)
 
@@ -187,6 +200,17 @@ def create_app(settings: Settings | None = None, *, environment: str | None = No
         session_context=Depends(get_session_context),
     )
     app.include_router(imports_router)
+
+    followers_router = build_followers_router(
+        database_path=resolved_settings.database_path,
+        require_session=Depends(require_session),
+        session_context=Depends(get_session_context),
+        service_factory=followers_service_factory,
+        youtube_api_key=resolved_settings.youtube_api_key,
+        tiktok_browser_data_dir=resolved_settings.tiktok_browser_data_dir,
+        tiktok_persistent_headless=resolved_settings.tiktok_persistent_headless,
+    )
+    app.include_router(followers_router)
 
     @app.get("/api/health")
     def health() -> dict:

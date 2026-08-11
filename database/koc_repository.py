@@ -1204,6 +1204,7 @@ class KOCRepository:
         sync_status: str,
         error_code: str | None,
         operator_mode: OperatorMode,
+        operator_name: str | None = None,
     ) -> None:
         connection.execute(
             """
@@ -1211,8 +1212,8 @@ class KOCRepository:
                 user_id, koc_name, old_follower_count, new_follower_count,
                 raw_display_value, source, source_url, fetched_at,
                 is_estimated, settlement_eligible, sync_status, error_code,
-                operator_mode
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                operator_mode, operator_name
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_id,
@@ -1228,6 +1229,7 @@ class KOCRepository:
                 sync_status,
                 error_code,
                 operator_mode.value,
+                operator_name,
             ),
         )
 
@@ -2669,6 +2671,7 @@ class KOCRepository:
         *,
         sync_status: FollowerSyncStatus = FollowerSyncStatus.SUCCESS,
         operator_mode: OperatorMode = OperatorMode.AUTOMATIC,
+        operator_name: str | None = None,
     ) -> KOCRecord:
         if not result.success:
             raise KOCRepositoryError("不能把失败的粉丝查询结果保存为成功。")
@@ -2759,6 +2762,7 @@ class KOCRepository:
                 sync_status=sync_status.value,
                 error_code=None,
                 operator_mode=operator_mode,
+                operator_name=operator_name,
             )
         updated = self.get(record_id)
         if updated is None:
@@ -2771,6 +2775,7 @@ class KOCRepository:
         result: FollowerFetchResult,
         *,
         operator_mode: OperatorMode = OperatorMode.AUTOMATIC,
+        operator_name: str | None = None,
     ) -> KOCRecord:
         current = self.get(record_id)
         if current is None:
@@ -2804,6 +2809,7 @@ class KOCRepository:
                 sync_status=FollowerSyncStatus.FAILED.value,
                 error_code=error_code,
                 operator_mode=operator_mode,
+                operator_name=operator_name,
             )
         updated = self.get(record_id)
         if updated is None:
@@ -2817,6 +2823,7 @@ class KOCRepository:
         *,
         sync_status: str = "SKIPPED",
         operator_mode: OperatorMode = OperatorMode.AUTOMATIC,
+        operator_name: str | None = None,
     ) -> None:
         current = self.get(record_id)
         if current is None:
@@ -2837,6 +2844,7 @@ class KOCRepository:
                 sync_status=sync_status,
                 error_code=result.error_code,
                 operator_mode=operator_mode,
+                operator_name=operator_name,
             )
 
     def list_follower_audit(self, user_id: str | None = None) -> pd.DataFrame:

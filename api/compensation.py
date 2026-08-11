@@ -4,7 +4,8 @@ from datetime import date, timedelta
 from typing import Any, Callable
 
 import pandas as pd
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Body, Header, HTTPException, Query
+from fastapi.responses import JSONResponse
 
 from core.commentary_compensation import (
     _video_url_key,
@@ -16,15 +17,24 @@ from core.dashboard_processor import filter_dashboard_data
 from core.grassroot_compensation import calculate_grassroot_compensation
 from core.long_term_compensation import calculate_long_term_compensation
 from core.traffic_boost import is_july_traffic_boost_month
-from database.dashboard_repository import DashboardRepository
+from database.dashboard_repository import (
+    DashboardRepository,
+    ThemeSubmissionRevisionExpiredError,
+)
 from database.db import connect, init_db
 from database.koc_repository import KOCRepository
 from models.enums import CreatorCategory
 
 from api.dashboard import _load_enriched_posts
 from api.dashboard_support import validation_error
+from api.idempotency import IdempotencyCache
 
 MAX_PAGE_SIZE = 100
+
+# Fields a client may never set directly; always server-controlled from the
+# session (see 19.6.7 audit convention / 19.5.3 lock endpoint constraint).
+_SERVER_CONTROLLED_FIELDS = {"operator_name", "operator", "session_id"}
+
 
 GRASSROOT_SORT_WHITELIST = {
     "total_amount_jpy",
@@ -202,14 +212,108 @@ def _mode_for_status(status: str) -> str:
     return "frozen" if status == "LOCKED" else "saved_draft"
 
 
-def build_compensation_router(*, database_path, require_session: Callable) -> APIRouter:
+def _error_response(status_code: int, code: str, message: str, field: str | None = None) -> HTTPException:
+    detail: dict[str, Any] = {"error": {"code": code, "message": message}}
+    if field is not None:
+        detail["error"]["field_errors"] = [{"field": field, "message": message}]
+    return HTTPException(status_code=status_code, detail=detail)
+
+
+def _not_found_error(message: str) -> HTTPException:
+    return _error_response(404, "NOT_FOUND", message)
+
+
+def _conflict_error(code: str, message: str) -> HTTPException:
+    return _error_response(409, code, message)
+
+
+def _strip_server_controlled(payload: dict) -> dict:
+    return {key: value for key, value in payload.items() if key not in _SERVER_CONTROLLED_FIELDS}
+
+
+def _clean_lock_note_field(payload: dict) -> str:
+    if "lock_note" not in payload or payload.get("lock_note") in (None, ""):
+        raise validation_error("lock_note 是必填字段，长度须为 1-500 个字符。", "lock_note")
+    lock_note = str(payload["lock_note"]).strip()
+    if not (1 <= len(lock_note) <= 500):
+        raise validation_error("lock_note 长度须为 1-500 个字符。", "lock_note")
+    return lock_note
+
+
+def _serialize_version(version) -> dict:
+    details = version.details
+    if details is None or (hasattr(details, "empty") and details.empty):
+        details_records: list[dict] = []
+    else:
+        details_records = details.to_dict("records")
+    return {
+        "id": version.id,
+        "period_month": version.period_month,
+        "version_no": version.version_no,
+        "status": version.status,
+        "jpy_to_usd_rate": version.jpy_to_usd_rate,
+        "details": details_records,
+        "summary": version.summary,
+        "note": version.note,
+        "created_at": version.created_at,
+        "updated_at": version.updated_at,
+        "locked_at": version.locked_at,
+        "lock_note": version.lock_note,
+        "locked_by": version.locked_by,
+    }
+
+
+def build_compensation_router(
+    *,
+    database_path,
+    require_session: Callable,
+    session_context: Callable | None = None,
+) -> APIRouter:
     router = APIRouter(dependencies=[require_session])
+    idempotency_cache = IdempotencyCache()
 
     def _repository() -> DashboardRepository:
         return DashboardRepository(database_path)
 
     def _creator_repository() -> KOCRepository:
         return KOCRepository(database_path)
+
+    def _run_idempotent(
+        *,
+        operation: str,
+        ctx: dict,
+        idempotency_key: str | None,
+        payload: dict,
+        execute: Callable[[], tuple[int, dict]],
+    ) -> JSONResponse:
+        session_id = ctx.get("session_id", "") if isinstance(ctx, dict) else ""
+        if idempotency_key:
+            body_hash = IdempotencyCache.hash_body(payload)
+            cached = idempotency_cache.lookup(operation, session_id, idempotency_key)
+            if cached is not None:
+                if cached.body_hash != body_hash:
+                    raise HTTPException(
+                        status_code=422,
+                        detail={
+                            "error": {
+                                "code": "IDEMPOTENCY_KEY_REUSED",
+                                "message": "该幂等键已用于不同的请求内容，请更换新的 Idempotency-Key。",
+                            }
+                        },
+                    )
+                return JSONResponse(status_code=cached.status_code, content=cached.body)
+            status_code, body = execute()
+            idempotency_cache.store(
+                operation,
+                session_id,
+                idempotency_key,
+                body_hash=body_hash,
+                status_code=status_code,
+                body=body,
+            )
+            return JSONResponse(status_code=status_code, content=body)
+        status_code, body = execute()
+        return JSONResponse(status_code=status_code, content=body)
 
     # ------------------------------------------------------------------
     # 18.1 periods
@@ -921,6 +1025,239 @@ def build_compensation_router(*, database_path, require_session: Callable) -> AP
 
         rows.sort(key=lambda item: (item["creator_id"], item["theme_code"]))
 
-        return {"data": rows, "meta": {"period_month": period_month}}
+        revision = repository.get_commentary_theme_submissions_revision(period_month)
+        return {"data": rows, "meta": {"period_month": period_month, "revision": revision}}
+
+    # ==================================================================
+    # 19.3.1 exchange-rate (one global rate/month; affects all 3 tracks'
+    # CURRENT PREVIEW only, never touches LOCKED versions).
+    # ==================================================================
+    @router.put("/api/compensation/{period_month}/exchange-rate")
+    def save_exchange_rate(period_month: str, payload: dict = Body(...)) -> dict:
+        _parse_period_month(period_month)
+        if "rate" not in payload or payload.get("rate") is None:
+            raise validation_error("rate 是必填字段。", "rate")
+        repository = _repository()
+        try:
+            rate = float(payload["rate"])
+        except (TypeError, ValueError) as exc:
+            raise validation_error("rate 必须是数字。", "rate") from exc
+        try:
+            repository.save_jpy_to_usd_rate(period_month, rate)
+        except ValueError as exc:
+            raise validation_error(str(exc), "rate") from exc
+        return {
+            "data": {
+                "period_month": period_month,
+                "rate": repository.get_jpy_to_usd_rate(period_month),
+            }
+        }
+
+    # ==================================================================
+    # 19.3.3 long-term activity-count save.
+    # ==================================================================
+    @router.put("/api/compensation/long-term/{period_month}/activity-counts")
+    def save_long_term_activity_counts(period_month: str, payload: dict = Body(...)) -> dict:
+        _parse_period_month(period_month)
+        activity_counts = payload.get("activity_counts")
+        if not isinstance(activity_counts, dict):
+            raise validation_error("activity_counts 是必填字段，须为对象。", "activity_counts")
+        repository = _repository()
+        try:
+            repository.save_long_term_activity_counts(period_month, activity_counts)
+        except ValueError as exc:
+            raise validation_error(str(exc), "activity_counts") from exc
+        return {
+            "data": {
+                "period_month": period_month,
+                "updated_count": len(activity_counts),
+            }
+        }
+
+    # ==================================================================
+    # 19.3.4 commentary theme-submission full-month replace with
+    # expected_revision optimistic concurrency check.
+    # ==================================================================
+    @router.put("/api/compensation/commentary/{period_month}/theme-submissions")
+    def save_commentary_theme_submissions(
+        period_month: str,
+        payload: dict = Body(...),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        ctx: dict = session_context,
+    ) -> JSONResponse:
+        _parse_period_month(period_month)
+        if "expected_revision" not in payload or payload.get("expected_revision") in (None, ""):
+            raise validation_error("expected_revision 是必填字段。", "expected_revision")
+        rows = payload.get("rows")
+        if not isinstance(rows, list):
+            raise validation_error("rows 是必填字段，须为数组。", "rows")
+        expected_revision = str(payload["expected_revision"])
+        clean_payload = {"expected_revision": expected_revision, "rows": rows}
+        repository = _repository()
+
+        def execute() -> tuple[int, dict]:
+            try:
+                updated_count = repository.replace_commentary_theme_submissions(
+                    period_month, rows, expected_revision=expected_revision
+                )
+            except ThemeSubmissionRevisionExpiredError as exc:
+                raise _conflict_error("REVISION_EXPIRED", str(exc)) from exc
+            except ValueError as exc:
+                raise validation_error(str(exc)) from exc
+            new_revision = repository.get_commentary_theme_submissions_revision(period_month)
+            return 200, {
+                "data": {
+                    "period_month": period_month,
+                    "updated_count": updated_count,
+                    "revision": new_revision,
+                }
+            }
+
+        return _run_idempotent(
+            operation="commentary_theme_submissions_replace",
+            ctx=ctx if isinstance(ctx, dict) else {},
+            idempotency_key=idempotency_key,
+            payload=clean_payload,
+            execute=execute,
+        )
+
+    # ==================================================================
+    # 19.5 settlement version drafts/locks for 草根/长包/解说.
+    # ==================================================================
+    def _version_track(
+        *,
+        prefix: str,
+        create_method: str,
+        update_method: str,
+        lock_method: str,
+        get_method: str,
+    ) -> None:
+        @router.post(f"{prefix}/{{period_month}}/drafts")
+        def create_draft(
+            period_month: str,
+            payload: dict = Body(...),
+            idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+            ctx: dict = session_context,
+        ) -> JSONResponse:
+            _parse_period_month(period_month)
+            clean = _strip_server_controlled(payload)
+            details_rows = clean.get("details") or []
+            if not isinstance(details_rows, list):
+                raise validation_error("details 须为数组。", "details")
+            summary = clean.get("summary") or {}
+            if not isinstance(summary, dict):
+                raise validation_error("summary 须为对象。", "summary")
+            try:
+                jpy_to_usd_rate = float(clean.get("jpy_to_usd_rate"))
+            except (TypeError, ValueError) as exc:
+                raise validation_error("jpy_to_usd_rate 是必填字段，须为大于 0 的数字。", "jpy_to_usd_rate") from exc
+            note = clean.get("note")
+
+            def execute() -> tuple[int, dict]:
+                details_df = pd.DataFrame(details_rows)
+                repository = _repository()
+                create_fn = getattr(repository, create_method)
+                try:
+                    version = create_fn(
+                        period_month,
+                        jpy_to_usd_rate=jpy_to_usd_rate,
+                        details=details_df,
+                        summary=summary,
+                        note=note,
+                    )
+                except ValueError as exc:
+                    raise validation_error(str(exc)) from exc
+                return 201, {"data": _serialize_version(version)}
+
+            return _run_idempotent(
+                operation=f"create_draft_{prefix}",
+                ctx=ctx if isinstance(ctx, dict) else {},
+                idempotency_key=idempotency_key,
+                payload=clean,
+                execute=execute,
+            )
+
+        @router.put(f"{prefix}/drafts/{{version_id}}")
+        def update_draft(version_id: int, payload: dict = Body(...)) -> dict:
+            repository = _repository()
+            get_fn = getattr(repository, get_method)
+            current = get_fn(version_id)
+            if current is None:
+                raise _not_found_error("未找到该结算版本草稿。")
+            if current.status == "LOCKED":
+                raise _conflict_error("VERSION_LOCKED", "该版本已锁定，无法编辑，请创建新版本。")
+            clean = _strip_server_controlled(payload)
+            details_rows = clean.get("details") or []
+            if not isinstance(details_rows, list):
+                raise validation_error("details 须为数组。", "details")
+            summary = clean.get("summary") or {}
+            if not isinstance(summary, dict):
+                raise validation_error("summary 须为对象。", "summary")
+            try:
+                jpy_to_usd_rate = float(clean.get("jpy_to_usd_rate"))
+            except (TypeError, ValueError) as exc:
+                raise validation_error("jpy_to_usd_rate 是必填字段，须为大于 0 的数字。", "jpy_to_usd_rate") from exc
+            details_df = pd.DataFrame(details_rows)
+            update_fn = getattr(repository, update_method)
+            try:
+                updated = update_fn(
+                    version_id,
+                    jpy_to_usd_rate=jpy_to_usd_rate,
+                    details=details_df,
+                    summary=summary,
+                    note=clean.get("note"),
+                )
+            except ValueError as exc:
+                # The repository's WHERE status='DRAFT' guard is the structural
+                # concurrency check (per 19.5.2): if it fires here it means the
+                # version was locked concurrently between our pre-check and the
+                # UPDATE, so surface it as a conflict rather than a validation error.
+                raise _conflict_error("VERSION_LOCKED", str(exc)) from exc
+            return {"data": _serialize_version(updated)}
+
+        @router.post(f"{prefix}/drafts/{{version_id}}/lock")
+        def lock_draft(
+            version_id: int,
+            payload: dict = Body(...),
+            ctx: dict = session_context,
+        ) -> dict:
+            repository = _repository()
+            get_fn = getattr(repository, get_method)
+            current = get_fn(version_id)
+            if current is None:
+                raise _not_found_error("未找到该结算版本草稿。")
+            if current.status == "LOCKED":
+                raise _conflict_error("VERSION_ALREADY_LOCKED", "该版本已锁定，请勿重复锁定。")
+            clean = _strip_server_controlled(payload)
+            lock_note = _clean_lock_note_field(clean)
+            operator_name = ctx.get("operator_name") if isinstance(ctx, dict) else None
+            lock_fn = getattr(repository, lock_method)
+            try:
+                locked = lock_fn(version_id, lock_note=lock_note, locked_by=operator_name)
+            except ValueError as exc:
+                raise _conflict_error("VERSION_ALREADY_LOCKED", str(exc)) from exc
+            return {"data": _serialize_version(locked)}
+
+    _version_track(
+        prefix="/api/compensation/grassroot",
+        create_method="create_compensation_draft",
+        update_method="update_compensation_draft",
+        lock_method="lock_compensation_version",
+        get_method="get_compensation_version",
+    )
+    _version_track(
+        prefix="/api/compensation/long-term",
+        create_method="create_long_term_compensation_draft",
+        update_method="update_long_term_compensation_draft",
+        lock_method="lock_long_term_compensation_version",
+        get_method="get_long_term_compensation_version",
+    )
+    _version_track(
+        prefix="/api/compensation/commentary",
+        create_method="create_commentary_compensation_draft",
+        update_method="update_commentary_compensation_draft",
+        lock_method="lock_commentary_compensation_version",
+        get_method="get_commentary_compensation_version",
+    )
 
     return router

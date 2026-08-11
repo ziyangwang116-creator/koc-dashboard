@@ -122,6 +122,36 @@ const revisionsResponse = {
 };
 const contractRevisionsMock = vi.fn(async (_id: number) => revisionsResponse);
 
+const manualUpdateMock = vi.fn(async (_id: number, _body: Record<string, unknown>) => ({
+  data: {
+    record_id: 1,
+    results: { youtube_follower_count: { status: "成功", follower_count: 12345, error_code: null, message: "更新成功" } },
+  },
+}));
+const createBatchJobMock = vi.fn(async () => ({
+  data: { job_id: "job_1", status: "PENDING", total: 1, created_at: "2026-01-01T00:00:00Z" },
+}));
+const getBatchJobMock = vi.fn(async () => ({
+  data: {
+    job_id: "job_1",
+    status: "SUCCEEDED",
+    total: 1,
+    processed: 1,
+    success: 1,
+    failed: 0,
+    skipped: 0,
+    youtube_success: 1,
+    youtube_failed: 0,
+    tiktok_success: 0,
+    tiktok_failed: 0,
+    started_at: "2026-01-01T00:00:01Z",
+    finished_at: "2026-01-01T00:00:02Z",
+  },
+}));
+const getBatchJobResultsMock = vi.fn(async () => ({
+  data: { job_id: "job_1", rows: [{ creator_id: 1, koc_name: "示例达人", status: "成功" }] },
+}));
+
 vi.mock("@/lib/endpoints", () => ({
   creatorsApi: {
     list: (...args: Parameters<typeof listMock>) => listMock(...args),
@@ -139,6 +169,12 @@ vi.mock("@/lib/endpoints", () => ({
     contractRevisions: (...args: Parameters<typeof contractRevisionsMock>) => contractRevisionsMock(...args),
   },
   metaApi: { contractTypes: vi.fn(async () => ({ data: { contract_types: ["YTB", "TT"] } })) },
+  followersApi: {
+    manualUpdate: (...args: Parameters<typeof manualUpdateMock>) => manualUpdateMock(...args),
+    createBatchJob: (...args: Parameters<typeof createBatchJobMock>) => createBatchJobMock(...args),
+    getBatchJob: (...args: Parameters<typeof getBatchJobMock>) => getBatchJobMock(...args),
+    getBatchJobResults: (...args: Parameters<typeof getBatchJobResultsMock>) => getBatchJobResultsMock(...args),
+  },
   authApi: { logout: vi.fn(async () => ({ data: { authenticated: false } })) },
 }));
 
@@ -154,6 +190,10 @@ beforeEach(() => {
   deleteContractPeriodMock.mockClear();
   revertContractRevisionMock.mockClear();
   contractRevisionsMock.mockClear();
+  manualUpdateMock.mockClear();
+  createBatchJobMock.mockClear();
+  getBatchJobMock.mockClear();
+  getBatchJobResultsMock.mockClear();
 });
 
 describe("CreatorsPage", () => {
@@ -303,5 +343,38 @@ describe("CreatorsPage", () => {
     await waitFor(() => expect(contractRevisionsMock).toHaveBeenCalledWith(1));
     await screen.findByText("已删除的合同周期");
     expect(screen.getByText("清除多余周期")).toBeInTheDocument();
+  });
+
+  it("saves a manual follower count and shows the result", async () => {
+    const user = userEvent.setup();
+    renderWithQueryClient(<CreatorsPage />);
+    await waitFor(() => expect(screen.getByText("示例达人")).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "查看详情" }));
+    await screen.findByLabelText("YouTube 粉丝数");
+
+    await user.type(screen.getByLabelText("YouTube 粉丝数"), "12345");
+    await user.click(screen.getByRole("button", { name: "保存粉丝数" }));
+
+    await waitFor(() => expect(manualUpdateMock).toHaveBeenCalledTimes(1));
+    expect(manualUpdateMock).toHaveBeenCalledWith(1, {
+      youtube_follower_count: 12345,
+      tiktok_follower_count: undefined,
+    });
+    expect(await screen.findByText(/youtube_follower_count: 成功/)).toBeInTheDocument();
+  });
+
+  it("triggers a batch follower-update job and polls to completion with per-creator results", async () => {
+    const user = userEvent.setup();
+    renderWithQueryClient(<CreatorsPage />);
+    await waitFor(() => expect(screen.getByText("示例达人")).toBeInTheDocument());
+
+    await user.click(screen.getByRole("button", { name: "触发批量更新任务" }));
+    await waitFor(() => expect(createBatchJobMock).toHaveBeenCalledTimes(1));
+
+    await waitFor(() => expect(getBatchJobMock).toHaveBeenCalled());
+    await screen.findByText(/SUCCEEDED/);
+
+    await waitFor(() => expect(getBatchJobResultsMock).toHaveBeenCalled());
+    expect(await screen.findByText("成功")).toBeInTheDocument();
   });
 });

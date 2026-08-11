@@ -5,7 +5,7 @@ from datetime import timedelta
 from typing import Callable
 
 import pandas as pd
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Body, Query
 from pydantic import BaseModel, Field
 
 from core.dashboard_processor import (
@@ -729,4 +729,21 @@ def build_dashboard_router(*, database_path, require_session: Callable) -> APIRo
         ]
         return {"data": data}
 
+    # ------------------------------------------------------------------
+    # 19.3.2 traffic-boost toggle (shared by dashboard/grassroot/long-term
+    # preview; commentary is explicitly excluded, see contract 19.3.2).
+    # ------------------------------------------------------------------
+    @router.put("/api/dashboard/{period_month}/traffic-boost")
+    def save_traffic_boost(period_month: str, payload: dict = Body(...)) -> dict:
+        if "enabled" not in payload:
+            raise validation_error("enabled 是必填字段。", "enabled")
+        repository = DashboardRepository(database_path)
+        try:
+            repository.save_traffic_boost_enabled(period_month, bool(payload.get("enabled")))
+        except ValueError as exc:
+            raise validation_error(str(exc)) from exc
+        enabled = repository.get_traffic_boost_enabled(period_month)
+        return {"data": {"period_month": period_month, "enabled": enabled}}
+
     return router
+

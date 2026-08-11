@@ -20,6 +20,12 @@ import type {
   CommentaryRow,
   ThemeSubmission,
   CompensationMeta,
+  CompensationVersionDetail,
+  ThemeSubmissionsMeta,
+  FollowerBatchJobSummary,
+  FollowerBatchJobStatus,
+  FollowerBatchJobResultRow,
+  FollowerManualUpdateResult,
 } from "./types";
 
 interface Envelope<T> {
@@ -108,6 +114,12 @@ export const dashboardApi = {
     ),
   importBatches: (params: Record<string, unknown> = {}) =>
     apiClient.get<{ data: ImportBatch[] }>("/dashboard/import-batches", params),
+  saveTrafficBoost: (periodMonth: string, enabled: boolean, options?: WriteOptions) =>
+    apiClient.put<{ data: { period_month: string; enabled: boolean } }>(
+      `/dashboard/${periodMonth}/traffic-boost`,
+      { enabled },
+      options
+    ),
 };
 
 export interface CompensationListResponse<T> {
@@ -130,9 +142,95 @@ export const compensationApi = {
   commentary: (params: Record<string, unknown>) =>
     apiClient.get<CompensationListResponse<CommentaryRow>>("/compensation/commentary", params),
   themeSubmissions: (params: Record<string, unknown>) =>
-    apiClient.get<{ data: ThemeSubmission[] }>(
+    apiClient.get<{ data: ThemeSubmission[]; meta: ThemeSubmissionsMeta }>(
       "/compensation/commentary/theme-submissions",
       params
+    ),
+  saveExchangeRate: (periodMonth: string, rate: number, options?: WriteOptions) =>
+    apiClient.put<{ data: { period_month: string; rate: number } }>(
+      `/compensation/${periodMonth}/exchange-rate`,
+      { rate },
+      options
+    ),
+  saveLongTermActivityCounts: (
+    periodMonth: string,
+    activityCounts: Record<string, number>,
+    options?: WriteOptions
+  ) =>
+    apiClient.put<{ data: { period_month: string; updated_count: number } }>(
+      `/compensation/long-term/${periodMonth}/activity-counts`,
+      { activity_counts: activityCounts },
+      options
+    ),
+  saveCommentaryThemeSubmissions: (
+    periodMonth: string,
+    rows: Record<string, unknown>[],
+    expectedRevision: string,
+    options?: WriteOptions
+  ) =>
+    apiClient.put<{
+      data: { period_month: string; updated_count: number; revision: string };
+    }>(
+      `/compensation/commentary/${periodMonth}/theme-submissions`,
+      { expected_revision: expectedRevision, rows },
+      options
+    ),
+  createDraft: (
+    lane: "grassroot" | "long-term" | "commentary",
+    periodMonth: string,
+    body: Record<string, unknown>,
+    options?: WriteOptions
+  ) =>
+    apiClient.post<{ data: CompensationVersionDetail }>(
+      `/compensation/${lane}/${periodMonth}/drafts`,
+      body,
+      undefined,
+      options
+    ),
+  updateDraft: (
+    lane: "grassroot" | "long-term" | "commentary",
+    versionId: number,
+    body: Record<string, unknown>
+  ) =>
+    apiClient.put<{ data: CompensationVersionDetail }>(
+      `/compensation/${lane}/drafts/${versionId}`,
+      body
+    ),
+  lockDraft: (
+    lane: "grassroot" | "long-term" | "commentary",
+    versionId: number,
+    lockNote: string
+  ) =>
+    apiClient.post<{ data: CompensationVersionDetail }>(
+      `/compensation/${lane}/drafts/${versionId}/lock`,
+      { lock_note: lockNote }
+    ),
+};
+
+export const followersApi = {
+  manualUpdate: (
+    creatorId: number,
+    body: { youtube_follower_count?: number | null; tiktok_follower_count?: number | null }
+  ) =>
+    apiClient.post<{ data: FollowerManualUpdateResult }>(
+      `/followers/${creatorId}/manual-update`,
+      body
+    ),
+  createBatchJob: (body: {
+    record_ids: number[];
+    required_platform?: string;
+    platform_by_record?: Record<number, string>;
+  }) =>
+    apiClient.post<{ data: FollowerBatchJobSummary }>("/followers/batch-update-jobs", body),
+  createAllTiktokJob: () =>
+    apiClient.post<{ data: FollowerBatchJobSummary }>("/followers/batch-update-jobs/all-tiktok"),
+  createAllYoutubeJob: () =>
+    apiClient.post<{ data: FollowerBatchJobSummary }>("/followers/batch-update-jobs/all-youtube"),
+  getBatchJob: (jobId: string) =>
+    apiClient.get<{ data: FollowerBatchJobStatus }>(`/followers/batch-update-jobs/${jobId}`),
+  getBatchJobResults: (jobId: string) =>
+    apiClient.get<{ data: { job_id: string; rows: FollowerBatchJobResultRow[] } }>(
+      `/followers/batch-update-jobs/${jobId}/results`
     ),
 };
 

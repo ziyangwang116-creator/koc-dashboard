@@ -1,14 +1,23 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { AppShell } from "@/components/AppShell";
 import { DataTable, type Column } from "@/components/DataTable";
 import { StateShell } from "@/components/DataStates";
-import { creatorsApi, metaApi } from "@/lib/endpoints";
+import { creatorsApi, metaApi, followersApi } from "@/lib/endpoints";
 import { fmtInt } from "@/lib/format";
-import type { Creator, ContractPeriod, CreatorDetail, ContractRevision } from "@/lib/types";
+import type {
+  Creator,
+  ContractPeriod,
+  CreatorDetail,
+  ContractRevision,
+  FollowerBatchJobStatus,
+  FollowerBatchJobResultRow,
+} from "@/lib/types";
 import { ApiError } from "@/lib/api-client";
+
+const TERMINAL_JOB_STATUSES = new Set(["SUCCEEDED", "FAILED"]);
 
 /**
  * Invalidate every query key that the API contract's affected-scope sections
@@ -110,6 +119,44 @@ export default function CreatorsPage() {
 
   const rows = listQuery.data?.data ?? [];
   const pagination = listQuery.data?.meta.pagination;
+
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [jobError, setJobError] = useState<string | null>(null);
+
+  const jobStatusQuery = useQuery({
+    queryKey: ["followers", "batch-job", jobId],
+    queryFn: () => followersApi.getBatchJob(jobId as string),
+    enabled: jobId !== null,
+    refetchInterval: (query) => {
+      const status = query.state.data?.data.status;
+      return status && TERMINAL_JOB_STATUSES.has(status) ? false : 2000;
+    },
+  });
+  const jobStatus: FollowerBatchJobStatus | undefined = jobStatusQuery.data?.data;
+  const jobDone = Boolean(jobStatus && TERMINAL_JOB_STATUSES.has(jobStatus.status));
+
+  const jobResultsQuery = useQuery({
+    queryKey: ["followers", "batch-job-results", jobId],
+    queryFn: () => followersApi.getBatchJobResults(jobId as string),
+    enabled: jobId !== null && jobDone,
+  });
+  const jobResults: FollowerBatchJobResultRow[] = jobResultsQuery.data?.data.rows ?? [];
+
+  const createBatchJobMutation = useMutation({
+    mutationFn: () => followersApi.createBatchJob({ record_ids: rows.map((r) => r.id) }),
+    onSuccess: (res) => {
+      setJobError(null);
+      setJobId(res.data.job_id);
+    },
+    onError: (err) => setJobError(errorMessageOf(err)),
+  });
+
+  useEffect(() => {
+    if (jobDone) {
+      invalidateAffectedQueries(queryClient);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobDone]);
 
   function beginEdit(row: Creator) {
     setActionError(null);
@@ -345,6 +392,61 @@ export default function CreatorsPage() {
         )}
 
         <div style={panelStyle}>
+          <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+            <strong style={{ fontSize: 13 }}>批量粉丝数更新</strong>
+            <button
+              type="button"
+              style={primaryBtn}
+              disabled={createBatchJobMutation.isPending || rows.length === 0 || (jobId !== null && !jobDone)}
+              onClick={() => createBatchJobMutation.mutate()}
+            >
+              触发批量更新任务
+            </button>
+            {jobId && jobStatus && (
+              <span style={{ fontSize: 12.5, color: "var(--color-text-muted)" }}>
+                任务 {jobStatus.job_id}：{jobStatus.status}（{jobStatus.processed}/{jobStatus.total}）
+              </span>
+            )}
+          </div>
+          {jobError && (
+            <div style={alertStyle} role="alert">
+              {jobError}
+            </div>
+          )}
+          {jobStatus && (
+            <div style={{ marginTop: 8, fontSize: 12.5 }}>
+              <div>
+                成功 {jobStatus.success} · 失败 {jobStatus.failed} · 跳过 {jobStatus.skipped}
+              </div>
+              {jobDone && jobResults.length > 0 && (
+                <table style={{ width: "100%", marginTop: 8 }}>
+                  <thead>
+                    <tr>
+                      {Object.keys(jobResults[0]).map((key) => (
+                        <th style={thCell} key={key}>
+                          {key}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {jobResults.map((row, idx) => (
+                      <tr key={idx}>
+                        {Object.keys(jobResults[0]).map((key) => (
+                          <td style={tdCell} key={key}>
+                            {String(row[key] ?? "")}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div style={panelStyle}>
           <StateShell
             isLoading={listQuery.isLoading}
             isError={listQuery.isError}
@@ -468,6 +570,27 @@ function CreatorDetailPanel({
     onError: onWriteError,
   });
 
+  const [youtubeFollowerDraft, setYoutubeFollowerDraft] = useState("");
+  const [tiktokFollowerDraft, setTiktokFollowerDraft] = useState("");
+  const [manualFollowerResult, setManualFollowerResult] = useState<string | null>(null);
+
+  const manualFollowerMutation = useMutation({
+    mutationFn: () =>
+      followersApi.manualUpdate(creatorId, {
+        youtube_follower_count: youtubeFollowerDraft === "" ? undefined : Number(youtubeFollowerDraft),
+        tiktok_follower_count: tiktokFollowerDraft === "" ? undefined : Number(tiktokFollowerDraft),
+      }),
+    onSuccess: (res) => {
+      onWriteSuccess();
+      setManualFollowerResult(
+        Object.entries(res.data.results)
+          .map(([field, r]) => `${field}: ${r.status}`)
+          .join("；")
+      );
+    },
+    onError: onWriteError,
+  });
+
   const detail = detailQuery.data?.data;
   const periods = (detail?.contract_periods ?? []).filter((p) =>
     periodSearch
@@ -494,6 +617,41 @@ function CreatorDetailPanel({
           <div style={{ fontSize: 13, display: "flex", flexDirection: "column", gap: 12 }}>
             <div>
               {detail.koc_name}（{detail.user_id}）· {detail.creator_category ?? "—"}
+            </div>
+
+            <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12.5 }}>
+                YouTube 粉丝数
+                <input
+                  aria-label="YouTube 粉丝数"
+                  style={inputStyle}
+                  value={youtubeFollowerDraft}
+                  onChange={(e) => setYoutubeFollowerDraft(e.target.value)}
+                />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12.5 }}>
+                TikTok 粉丝数
+                <input
+                  aria-label="TikTok 粉丝数"
+                  style={inputStyle}
+                  value={tiktokFollowerDraft}
+                  onChange={(e) => setTiktokFollowerDraft(e.target.value)}
+                />
+              </label>
+              <button
+                type="button"
+                style={primaryBtn}
+                disabled={
+                  manualFollowerMutation.isPending ||
+                  (!youtubeFollowerDraft.trim() && !tiktokFollowerDraft.trim())
+                }
+                onClick={() => manualFollowerMutation.mutate()}
+              >
+                保存粉丝数
+              </button>
+              {manualFollowerResult && (
+                <span style={{ fontSize: 12.5, color: "var(--color-text-muted)" }}>{manualFollowerResult}</span>
+              )}
             </div>
 
             {panelError && (

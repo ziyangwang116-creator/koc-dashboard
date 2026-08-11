@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
 from io import StringIO
@@ -15,6 +16,12 @@ from core.cross_industry import (
     normalize_video_url,
 )
 from database.db import connect, init_db, normalize_database_target
+
+
+class ThemeSubmissionRevisionExpiredError(ValueError):
+    """Raised by replace_commentary_theme_submissions() when the caller's
+    expected_revision does not match the server's current revision for that
+    month (per 19.3.4 optimistic concurrency)."""
 
 
 @dataclass(frozen=True)
@@ -39,6 +46,8 @@ class CompensationVersion:
     created_at: str
     updated_at: str
     locked_at: str | None
+    lock_note: str | None = None
+    locked_by: str | None = None
 
 
 class DashboardRepository:
@@ -737,6 +746,21 @@ class DashboardRepository:
                 ),
             )
 
+    @staticmethod
+    def _clean_lock_note(lock_note: str | None) -> str | None:
+        """Validate lock_note length when provided.
+
+        The API layer (per 19.5.3) treats lock_note as strictly required;
+        the repository itself keeps it optional so existing callers (e.g.
+        the legacy Streamlit UI) that don't yet pass one keep working.
+        """
+        if lock_note is None:
+            return None
+        text = str(lock_note).strip()
+        if not (1 <= len(text) <= 500):
+            raise ValueError("lock_note 长度须为 1-500 个字符。")
+        return text
+
     @classmethod
     def _version_details_json(cls, details: pd.DataFrame) -> str:
         rows = [
@@ -767,7 +791,25 @@ class DashboardRepository:
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
             locked_at=row["locked_at"],
+            lock_note=row["lock_note"] if "lock_note" in row.keys() else None,
+            locked_by=row["locked_by"] if "locked_by" in row.keys() else None,
         )
+
+    def _get_version_by_id(self, table_name: str, version_id: int) -> CompensationVersion | None:
+        with connect(self.database_path) as connection:
+            row = connection.execute(
+                f"SELECT * FROM {table_name} WHERE id = ?", (version_id,)
+            ).fetchone()
+        return self._version_from_row(row) if row is not None else None
+
+    def get_compensation_version(self, version_id: int) -> CompensationVersion | None:
+        return self._get_version_by_id("grassroot_compensation_version", version_id)
+
+    def get_long_term_compensation_version(self, version_id: int) -> CompensationVersion | None:
+        return self._get_version_by_id("long_term_compensation_version", version_id)
+
+    def get_commentary_compensation_version(self, version_id: int) -> CompensationVersion | None:
+        return self._get_version_by_id("commentary_compensation_version", version_id)
 
     def list_compensation_versions(self, period_month: str) -> list[CompensationVersion]:
         period = self._snapshot_period_month(period_month)
@@ -857,16 +899,24 @@ class DashboardRepository:
             raise RuntimeError("结算草稿更新后无法读取。")
         return self._version_from_row(row)
 
-    def lock_compensation_version(self, version_id: int) -> CompensationVersion:
+    def lock_compensation_version(
+        self,
+        version_id: int,
+        *,
+        lock_note: str | None = None,
+        locked_by: str | None = None,
+    ) -> CompensationVersion:
+        lock_note = self._clean_lock_note(lock_note)
         with connect(self.database_path) as connection:
             cursor = connection.execute(
                 """
                 UPDATE grassroot_compensation_version SET
                     status = 'LOCKED', locked_at = CURRENT_TIMESTAMP,
+                    lock_note = ?, locked_by = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND status = 'DRAFT'
                 """,
-                (version_id,),
+                (lock_note, locked_by, version_id),
             )
             if cursor.rowcount != 1:
                 raise ValueError("只能锁定可编辑的结算草稿。")
@@ -972,16 +1022,21 @@ class DashboardRepository:
     def lock_long_term_compensation_version(
         self,
         version_id: int,
+        *,
+        lock_note: str | None = None,
+        locked_by: str | None = None,
     ) -> CompensationVersion:
+        lock_note = self._clean_lock_note(lock_note)
         with connect(self.database_path) as connection:
             cursor = connection.execute(
                 """
                 UPDATE long_term_compensation_version SET
                     status = 'LOCKED', locked_at = CURRENT_TIMESTAMP,
+                    lock_note = ?, locked_by = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND status = 'DRAFT'
                 """,
-                (version_id,),
+                (lock_note, locked_by, version_id),
             )
             if cursor.rowcount != 1:
                 raise ValueError("只能锁定可编辑的长包结算草稿。")
@@ -1058,10 +1113,30 @@ class DashboardRepository:
             )
         return submissions
 
+    def get_commentary_theme_submissions_revision(self, period_month: str) -> str:
+        """Current revision token for the month's full theme-submission list.
+
+        Returns a stable initial token ("rev_0") for months that have never
+        had a replace_commentary_theme_submissions() call, so a first-time
+        caller can supply expected_revision="rev_0" and proceed uncontested.
+        """
+        period = self._snapshot_period_month(period_month)
+        with connect(self.database_path) as connection:
+            row = connection.execute(
+                """
+                SELECT revision FROM commentary_theme_submission_revision
+                WHERE period_month = ?
+                """,
+                (period,),
+            ).fetchone()
+        return str(row["revision"]) if row is not None else "rev_0"
+
     def replace_commentary_theme_submissions(
         self,
         period_month: str,
         rows: Iterable[Mapping[str, Any]],
+        *,
+        expected_revision: str | None = None,
     ) -> int:
         period = self._snapshot_period_month(period_month)
         allowed_formats = {"LONG", "SHORT"}
@@ -1120,7 +1195,23 @@ class DashboardRepository:
                     self._key_text(row.get("note") or row.get("备注")) or None,
                 )
             )
+        new_revision = f"rev_{uuid.uuid4().hex}"
         with connect(self.database_path) as connection:
+            if expected_revision is not None:
+                current_row = connection.execute(
+                    """
+                    SELECT revision FROM commentary_theme_submission_revision
+                    WHERE period_month = ?
+                    """,
+                    (period,),
+                ).fetchone()
+                current_revision = (
+                    str(current_row["revision"]) if current_row is not None else "rev_0"
+                )
+                if current_revision != expected_revision:
+                    raise ThemeSubmissionRevisionExpiredError(
+                        "该月申报列表已被其他会话更新，请刷新后基于最新列表重新提交。"
+                    )
             connection.execute(
                 "DELETE FROM commentary_theme_submission WHERE period_month = ?",
                 (period,),
@@ -1135,7 +1226,19 @@ class DashboardRepository:
                     """,
                     values,
                 )
+            connection.execute(
+                """
+                INSERT INTO commentary_theme_submission_revision (
+                    period_month, revision
+                ) VALUES (?, ?)
+                ON CONFLICT(period_month) DO UPDATE SET
+                    revision = excluded.revision,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (period, new_revision),
+            )
         return len(values)
+
 
     def list_commentary_compensation_versions(
         self,
@@ -1236,16 +1339,21 @@ class DashboardRepository:
     def lock_commentary_compensation_version(
         self,
         version_id: int,
+        *,
+        lock_note: str | None = None,
+        locked_by: str | None = None,
     ) -> CompensationVersion:
+        lock_note = self._clean_lock_note(lock_note)
         with connect(self.database_path) as connection:
             cursor = connection.execute(
                 """
                 UPDATE commentary_compensation_version SET
                     status = 'LOCKED', locked_at = CURRENT_TIMESTAMP,
+                    lock_note = ?, locked_by = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND status = 'DRAFT'
                 """,
-                (version_id,),
+                (lock_note, locked_by, version_id),
             )
             if cursor.rowcount != 1:
                 raise ValueError("只能锁定可编辑的解说结算草稿。")

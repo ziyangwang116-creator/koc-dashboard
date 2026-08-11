@@ -334,3 +334,66 @@ export interface ThemeSubmission {
   billing_excluded_url_count: number;
   billing_excluded: boolean;
 }
+
+export interface ThemeSubmissionsMeta {
+  period_month: string;
+  revision: string;
+}
+
+export interface CompensationVersionDetail {
+  id: number;
+  period_month: string;
+  version_no: number | null;
+  status: "DRAFT" | "LOCKED";
+  jpy_to_usd_rate: number;
+  details: Record<string, unknown>[];
+  summary: Record<string, unknown>;
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+  locked_at: string | null;
+  lock_note: string | null;
+  locked_by: string | null;
+}
+
+// --- Followers ---
+
+export interface FollowerBatchJobSummary {
+  job_id: string;
+  status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED";
+  total: number;
+  created_at: string;
+}
+
+export interface FollowerBatchJobStatus {
+  job_id: string;
+  status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED";
+  total: number;
+  processed: number;
+  success: number;
+  failed: number;
+  skipped: number;
+  youtube_success: number;
+  youtube_failed: number;
+  tiktok_success: number;
+  tiktok_failed: number;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface FollowerBatchJobResultRow {
+  [key: string]: unknown;
+}
+
+export interface FollowerManualUpdateResult {
+  record_id: number;
+  results: Record<
+    string,
+    {
+      status: string;
+      follower_count: number | null;
+      error_code: string | null;
+      message: string | null;
+    }
+  >;
+}
