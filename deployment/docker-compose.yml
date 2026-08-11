@@ -1,0 +1,47 @@
+# Local/production compose file. The Next.js frontend already proxies same-origin
+# /api/* requests to the backend via next.config.ts `rewrites()`, so no separate
+# reverse proxy (nginx) container is needed: the frontend container IS the single
+# entrypoint, and it forwards /api/* to the `api` service internally.
+#
+# Usage:
+#   cp .env.example .env               # local development values
+#   docker compose --env-file .env up --build
+#
+# For production, use .env.production.example as a starting point instead.
+
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile.api
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
+      TEAM_PASSWORD: ${TEAM_PASSWORD:-changeme}
+      YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}
+      AI_PROVIDER: ${AI_PROVIDER:-deepseek}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+    volumes:
+      - koc-data:/app/data
+    restart: unless-stopped
+    expose:
+      - "8000"
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: ../deployment/Dockerfile.frontend
+    environment:
+      # Same-origin proxy target used by next.config.ts rewrites(); "api" is
+      # the docker-compose service name, resolved via the compose network.
+      API_PROXY_TARGET: http://api:8000
+      PORT: "3000"
+    depends_on:
+      - api
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+
+volumes:
+  koc-data:

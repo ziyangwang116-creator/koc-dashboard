@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
 from io import StringIO
@@ -15,6 +16,12 @@ from core.cross_industry import (
     normalize_video_url,
 )
 from database.db import connect, init_db, normalize_database_target
+
+
+class ThemeSubmissionRevisionExpiredError(ValueError):
+    """Raised by replace_commentary_theme_submissions() when the caller's
+    expected_revision does not match the server's current revision for that
+    month (per 19.3.4 optimistic concurrency)."""
 
 
 @dataclass(frozen=True)
@@ -39,6 +46,8 @@ class CompensationVersion:
     created_at: str
     updated_at: str
     locked_at: str | None
+    lock_note: str | None = None
+    locked_by: str | None = None
 
 
 class DashboardRepository:
@@ -317,6 +326,34 @@ class DashboardRepository:
             removed_count = 0
             if replace_months and periods:
                 placeholders = ", ".join("?" for _ in periods)
+                # Immutable pre-replace snapshot (19.2.2): capture the full rows
+                # that are about to be overwritten, in the SAME transaction as
+                # the delete/insert below, so a later rollback can truly restore
+                # them (not merely delete the new batch's rows).
+                existing_rows = connection.execute(
+                    "SELECT record_key, source_file, publish_date, payload_json "
+                    "FROM dashboard_post "
+                    f"WHERE substr(publish_date, 1, 7) IN ({placeholders})",
+                    periods,
+                ).fetchall()
+                if existing_rows:
+                    connection.executemany(
+                        """
+                        INSERT INTO dashboard_import_batch_snapshot (
+                            batch_id, record_key, source_file, publish_date, payload_json
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        [
+                            (
+                                batch_id,
+                                row["record_key"],
+                                row["source_file"],
+                                row["publish_date"],
+                                row["payload_json"],
+                            )
+                            for row in existing_rows
+                        ],
+                    )
                 deleted = connection.execute(
                     "DELETE FROM dashboard_post "
                     f"WHERE substr(publish_date, 1, 7) IN ({placeholders})",
@@ -350,6 +387,95 @@ class DashboardRepository:
             removed_count=removed_count,
             batch_id=batch_id,
         )
+
+    def rollback_import_batch(self, batch_id: int) -> dict[str, int]:
+        """True atomic restore of the pre-replace snapshot for one batch (19.2.3).
+
+        Only the most recent REPLACE_MONTHS batch covering a given month may
+        be rolled back; a batch that has already been rolled back cannot be
+        rolled back again. Restoring deletes the current rows for the
+        batch's covered months, then re-inserts the saved snapshot rows —
+        never a delete-only operation.
+        """
+        with connect(self.database_path) as connection:
+            batch = connection.execute(
+                "SELECT id, mode, period_months_json, rolled_back_at "
+                "FROM dashboard_import_batch WHERE id = ?",
+                (batch_id,),
+            ).fetchone()
+            if batch is None:
+                raise ValueError(f"导入批次不存在：batch_id={batch_id}。")
+            if batch["mode"] != "REPLACE_MONTHS":
+                raise ValueError("该批次不是按月完整替换导入，无法回滚。")
+            if batch["rolled_back_at"]:
+                raise ValueError("该批次已经回滚过，请勿重复操作。")
+
+            periods = json.loads(batch["period_months_json"])
+            if periods:
+                period_set = set(periods)
+                newer_rows = connection.execute(
+                    "SELECT id, period_months_json FROM dashboard_import_batch "
+                    "WHERE id > ? AND mode = 'REPLACE_MONTHS' ORDER BY id",
+                    (batch_id,),
+                ).fetchall()
+                for row in newer_rows:
+                    other_periods = set(json.loads(row["period_months_json"]))
+                    if other_periods & period_set:
+                        raise ValueError(
+                            "存在更新的导入批次（batch_id="
+                            f"{int(row['id'])}），无法安全回滚，请联系管理员处理。"
+                        )
+
+            snapshot_rows = connection.execute(
+                "SELECT record_key, source_file, publish_date, payload_json "
+                "FROM dashboard_import_batch_snapshot WHERE batch_id = ?",
+                (batch_id,),
+            ).fetchall()
+
+            removed_count = 0
+            if periods:
+                placeholders = ", ".join("?" for _ in periods)
+                deleted = connection.execute(
+                    "DELETE FROM dashboard_post "
+                    f"WHERE substr(publish_date, 1, 7) IN ({placeholders})",
+                    periods,
+                )
+                removed_count = max(deleted.rowcount, 0)
+
+            if snapshot_rows:
+                connection.executemany(
+                    """
+                    INSERT INTO dashboard_post (
+                        record_key, source_file, publish_date, payload_json
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(record_key) DO UPDATE SET
+                        source_file = excluded.source_file,
+                        publish_date = excluded.publish_date,
+                        payload_json = excluded.payload_json,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    [
+                        (
+                            row["record_key"],
+                            row["source_file"],
+                            row["publish_date"],
+                            row["payload_json"],
+                        )
+                        for row in snapshot_rows
+                    ],
+                )
+
+            connection.execute(
+                "UPDATE dashboard_import_batch SET rolled_back_at = CURRENT_TIMESTAMP "
+                "WHERE id = ?",
+                (batch_id,),
+            )
+
+        return {
+            "batch_id": batch_id,
+            "restored_count": len(snapshot_rows),
+            "removed_count": removed_count,
+        }
 
     def list_import_batches(self, *, limit: int = 30) -> pd.DataFrame:
         with connect(self.database_path) as connection:
@@ -620,6 +746,21 @@ class DashboardRepository:
                 ),
             )
 
+    @staticmethod
+    def _clean_lock_note(lock_note: str | None) -> str | None:
+        """Validate lock_note length when provided.
+
+        The API layer (per 19.5.3) treats lock_note as strictly required;
+        the repository itself keeps it optional so existing callers (e.g.
+        the legacy Streamlit UI) that don't yet pass one keep working.
+        """
+        if lock_note is None:
+            return None
+        text = str(lock_note).strip()
+        if not (1 <= len(text) <= 500):
+            raise ValueError("lock_note 长度须为 1-500 个字符。")
+        return text
+
     @classmethod
     def _version_details_json(cls, details: pd.DataFrame) -> str:
         rows = [
@@ -650,7 +791,25 @@ class DashboardRepository:
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
             locked_at=row["locked_at"],
+            lock_note=row["lock_note"] if "lock_note" in row.keys() else None,
+            locked_by=row["locked_by"] if "locked_by" in row.keys() else None,
         )
+
+    def _get_version_by_id(self, table_name: str, version_id: int) -> CompensationVersion | None:
+        with connect(self.database_path) as connection:
+            row = connection.execute(
+                f"SELECT * FROM {table_name} WHERE id = ?", (version_id,)
+            ).fetchone()
+        return self._version_from_row(row) if row is not None else None
+
+    def get_compensation_version(self, version_id: int) -> CompensationVersion | None:
+        return self._get_version_by_id("grassroot_compensation_version", version_id)
+
+    def get_long_term_compensation_version(self, version_id: int) -> CompensationVersion | None:
+        return self._get_version_by_id("long_term_compensation_version", version_id)
+
+    def get_commentary_compensation_version(self, version_id: int) -> CompensationVersion | None:
+        return self._get_version_by_id("commentary_compensation_version", version_id)
 
     def list_compensation_versions(self, period_month: str) -> list[CompensationVersion]:
         period = self._snapshot_period_month(period_month)
@@ -740,16 +899,24 @@ class DashboardRepository:
             raise RuntimeError("结算草稿更新后无法读取。")
         return self._version_from_row(row)
 
-    def lock_compensation_version(self, version_id: int) -> CompensationVersion:
+    def lock_compensation_version(
+        self,
+        version_id: int,
+        *,
+        lock_note: str | None = None,
+        locked_by: str | None = None,
+    ) -> CompensationVersion:
+        lock_note = self._clean_lock_note(lock_note)
         with connect(self.database_path) as connection:
             cursor = connection.execute(
                 """
                 UPDATE grassroot_compensation_version SET
                     status = 'LOCKED', locked_at = CURRENT_TIMESTAMP,
+                    lock_note = ?, locked_by = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND status = 'DRAFT'
                 """,
-                (version_id,),
+                (lock_note, locked_by, version_id),
             )
             if cursor.rowcount != 1:
                 raise ValueError("只能锁定可编辑的结算草稿。")
@@ -855,16 +1022,21 @@ class DashboardRepository:
     def lock_long_term_compensation_version(
         self,
         version_id: int,
+        *,
+        lock_note: str | None = None,
+        locked_by: str | None = None,
     ) -> CompensationVersion:
+        lock_note = self._clean_lock_note(lock_note)
         with connect(self.database_path) as connection:
             cursor = connection.execute(
                 """
                 UPDATE long_term_compensation_version SET
                     status = 'LOCKED', locked_at = CURRENT_TIMESTAMP,
+                    lock_note = ?, locked_by = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND status = 'DRAFT'
                 """,
-                (version_id,),
+                (lock_note, locked_by, version_id),
             )
             if cursor.rowcount != 1:
                 raise ValueError("只能锁定可编辑的长包结算草稿。")
@@ -875,101 +1047,6 @@ class DashboardRepository:
         if row is None:
             raise RuntimeError("长包结算版本锁定后无法读取。")
         return self._version_from_row(row)
-
-    def get_commentary_validity_overrides(
-        self,
-        period_month: str,
-    ) -> dict[str, dict[str, Any]]:
-        period = self._snapshot_period_month(period_month)
-        with connect(self.database_path) as connection:
-            rows = connection.execute(
-                """
-                SELECT creator_id, url, average_watch_rate,
-                       recent_three_month_average, valid_ratio,
-                       review_status, reason
-                FROM commentary_post_validity
-                WHERE period_month = ?
-                ORDER BY creator_id, url
-                """,
-                (period,),
-            ).fetchall()
-        return {
-            str(row["url"]): {
-                "creator_id": int(row["creator_id"]),
-                "url": str(row["url"]),
-                "average_watch_rate": row["average_watch_rate"],
-                "recent_three_month_average": row["recent_three_month_average"],
-                "valid_ratio": float(row["valid_ratio"]),
-                "review_status": str(row["review_status"]),
-                "reason": row["reason"],
-            }
-            for row in rows
-        }
-
-    def save_commentary_validity_overrides(
-        self,
-        period_month: str,
-        rows: Iterable[Mapping[str, Any]],
-    ) -> int:
-        period = self._snapshot_period_month(period_month)
-        allowed_ratios = {0.0, 0.5, 0.6, 0.7, 1.0}
-        allowed_statuses = {"AUTO", "PENDING", "APPROVED", "REJECTED"}
-        values: list[tuple[Any, ...]] = []
-        for row in rows:
-            creator_id = int(row.get("creator_id") or 0)
-            url = self._key_text(row.get("url") or row.get("URL"))
-            if creator_id <= 0 or not url:
-                continue
-            ratio = float(row.get("valid_ratio", row.get("有效播放比例", 0)))
-            status = self._key_text(
-                row.get("review_status") or row.get("审核状态") or "PENDING"
-            ).upper()
-            if ratio not in allowed_ratios:
-                raise ValueError("有效播放比例只能选择 0%、50%、60%、70% 或 100%。")
-            if status not in allowed_statuses:
-                raise ValueError("有效播放审核状态无效。")
-
-            def optional_number(*keys: str) -> float | None:
-                value = next((row.get(key) for key in keys if key in row), None)
-                numeric = pd.to_numeric(value, errors="coerce")
-                return None if pd.isna(numeric) else float(numeric)
-
-            values.append(
-                (
-                    period,
-                    creator_id,
-                    url,
-                    optional_number("average_watch_rate", "平均观看率"),
-                    optional_number(
-                        "recent_three_month_average",
-                        "近3月单条平均播放量",
-                    ),
-                    ratio,
-                    status,
-                    self._key_text(row.get("reason") or row.get("审核说明")) or None,
-                )
-            )
-        if values:
-            with connect(self.database_path) as connection:
-                connection.executemany(
-                    """
-                    INSERT INTO commentary_post_validity (
-                        period_month, creator_id, url, average_watch_rate,
-                        recent_three_month_average, valid_ratio,
-                        review_status, reason
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(period_month, url) DO UPDATE SET
-                        creator_id = excluded.creator_id,
-                        average_watch_rate = excluded.average_watch_rate,
-                        recent_three_month_average = excluded.recent_three_month_average,
-                        valid_ratio = excluded.valid_ratio,
-                        review_status = excluded.review_status,
-                        reason = excluded.reason,
-                        updated_at = CURRENT_TIMESTAMP
-                    """,
-                    values,
-                )
-        return len(values)
 
     def list_commentary_theme_definitions(
         self,
@@ -1036,10 +1113,30 @@ class DashboardRepository:
             )
         return submissions
 
+    def get_commentary_theme_submissions_revision(self, period_month: str) -> str:
+        """Current revision token for the month's full theme-submission list.
+
+        Returns a stable initial token ("rev_0") for months that have never
+        had a replace_commentary_theme_submissions() call, so a first-time
+        caller can supply expected_revision="rev_0" and proceed uncontested.
+        """
+        period = self._snapshot_period_month(period_month)
+        with connect(self.database_path) as connection:
+            row = connection.execute(
+                """
+                SELECT revision FROM commentary_theme_submission_revision
+                WHERE period_month = ?
+                """,
+                (period,),
+            ).fetchone()
+        return str(row["revision"]) if row is not None else "rev_0"
+
     def replace_commentary_theme_submissions(
         self,
         period_month: str,
         rows: Iterable[Mapping[str, Any]],
+        *,
+        expected_revision: str | None = None,
     ) -> int:
         period = self._snapshot_period_month(period_month)
         allowed_formats = {"LONG", "SHORT"}
@@ -1098,7 +1195,23 @@ class DashboardRepository:
                     self._key_text(row.get("note") or row.get("备注")) or None,
                 )
             )
+        new_revision = f"rev_{uuid.uuid4().hex}"
         with connect(self.database_path) as connection:
+            if expected_revision is not None:
+                current_row = connection.execute(
+                    """
+                    SELECT revision FROM commentary_theme_submission_revision
+                    WHERE period_month = ?
+                    """,
+                    (period,),
+                ).fetchone()
+                current_revision = (
+                    str(current_row["revision"]) if current_row is not None else "rev_0"
+                )
+                if current_revision != expected_revision:
+                    raise ThemeSubmissionRevisionExpiredError(
+                        "该月申报列表已被其他会话更新，请刷新后基于最新列表重新提交。"
+                    )
             connection.execute(
                 "DELETE FROM commentary_theme_submission WHERE period_month = ?",
                 (period,),
@@ -1113,7 +1226,19 @@ class DashboardRepository:
                     """,
                     values,
                 )
+            connection.execute(
+                """
+                INSERT INTO commentary_theme_submission_revision (
+                    period_month, revision
+                ) VALUES (?, ?)
+                ON CONFLICT(period_month) DO UPDATE SET
+                    revision = excluded.revision,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (period, new_revision),
+            )
         return len(values)
+
 
     def list_commentary_compensation_versions(
         self,
@@ -1214,16 +1339,21 @@ class DashboardRepository:
     def lock_commentary_compensation_version(
         self,
         version_id: int,
+        *,
+        lock_note: str | None = None,
+        locked_by: str | None = None,
     ) -> CompensationVersion:
+        lock_note = self._clean_lock_note(lock_note)
         with connect(self.database_path) as connection:
             cursor = connection.execute(
                 """
                 UPDATE commentary_compensation_version SET
                     status = 'LOCKED', locked_at = CURRENT_TIMESTAMP,
+                    lock_note = ?, locked_by = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND status = 'DRAFT'
                 """,
-                (version_id,),
+                (lock_note, locked_by, version_id),
             )
             if cursor.rowcount != 1:
                 raise ValueError("只能锁定可编辑的解说结算草稿。")

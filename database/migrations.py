@@ -56,6 +56,8 @@ AUTHORITATIVE_CONTRACT_PERIODS_MIGRATION_ID = (
 )
 CONTRACT_REVISION_AUDIT_MIGRATION_ID = "v2.0_contract_revision_audit"
 AI_AGENT_STORAGE_MIGRATION_ID = "v2.1_ai_agent_storage"
+DASHBOARD_IMPORT_SNAPSHOT_MIGRATION_ID = "v2.2_dashboard_import_batch_snapshot"
+SETTLEMENT_LOCK_AUDIT_MIGRATION_ID = "v2.3_settlement_lock_audit"
 FOLLOWER_AUDIT_COLUMNS = (
     "id",
     "user_id",
@@ -992,6 +994,68 @@ def _create_commentary_compensation_storage(
     )
 
 
+def _create_dashboard_import_batch_snapshot(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dashboard_import_batch_snapshot (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id INTEGER NOT NULL,
+            record_key TEXT NOT NULL,
+            source_file TEXT NOT NULL,
+            publish_date TEXT,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (batch_id) REFERENCES dashboard_import_batch(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dashboard_import_snapshot_batch "
+        "ON dashboard_import_batch_snapshot(batch_id)"
+    )
+    batch_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(dashboard_import_batch)")
+    }
+    if "rolled_back_at" not in batch_columns:
+        connection.execute(
+            "ALTER TABLE dashboard_import_batch ADD COLUMN rolled_back_at TEXT"
+        )
+
+
+def _add_column_if_missing(
+    connection: sqlite3.Connection, table_name: str, column: str, ddl: str
+) -> None:
+    existing = {
+        str(row[1]) for row in connection.execute(f"PRAGMA table_info({table_name})")
+    }
+    if column not in existing:
+        connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {ddl}")
+
+
+def _create_settlement_lock_audit(connection: sqlite3.Connection) -> None:
+    """Add lock_note/locked_by audit columns to the three settlement version
+    tables (per 19.5.3: lock_note is required + operator_name is recorded),
+    and a per-month revision tracker for commentary theme submissions so
+    replace_commentary_theme_submissions() can support expected_revision
+    optimistic concurrency (per 19.3.4)."""
+    for table_name in (
+        "grassroot_compensation_version",
+        "long_term_compensation_version",
+        "commentary_compensation_version",
+    ):
+        _add_column_if_missing(connection, table_name, "lock_note", "lock_note TEXT")
+        _add_column_if_missing(connection, table_name, "locked_by", "locked_by TEXT")
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS commentary_theme_submission_revision (
+            period_month TEXT PRIMARY KEY,
+            revision TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+
 def _current_columns(connection: sqlite3.Connection) -> tuple[str, ...]:
     return tuple(
         str(row[1]) for row in connection.execute("PRAGMA table_info(koc_master)")
@@ -1335,6 +1399,13 @@ def apply_migrations(
     _record_migration(connection, CONTRACT_REVISION_AUDIT_MIGRATION_ID)
     _create_ai_agent_storage(connection)
     _record_migration(connection, AI_AGENT_STORAGE_MIGRATION_ID)
+    _create_dashboard_import_batch_snapshot(connection)
+    _record_migration(connection, DASHBOARD_IMPORT_SNAPSHOT_MIGRATION_ID)
+    _add_column_if_missing(
+        connection, "follower_update_audit", "operator_name", "operator_name TEXT"
+    )
+    _create_settlement_lock_audit(connection)
+    _record_migration(connection, SETTLEMENT_LOCK_AUDIT_MIGRATION_ID)
 
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_koc_master_user_id ON koc_master(user_id)"

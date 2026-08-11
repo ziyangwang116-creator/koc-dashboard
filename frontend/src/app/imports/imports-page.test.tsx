@@ -1,0 +1,240 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { renderWithQueryClient } from "@/test-utils";
+import { ApiError } from "@/lib/api-client";
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ replace: vi.fn(), push: vi.fn() }),
+  usePathname: () => "/imports",
+}));
+
+const previewResponse = {
+  data: {
+    preview_token: "token-1",
+    input_row_count: 2,
+    matched_row_count: 1,
+    period_months: ["2026-01"],
+    cross_industry_flagged_count: 0,
+    column_warnings: [],
+    additions: { count: 1, rows: [{ koc_name: "示例达人", platform: "TikTok", publish_date: "2026-01-05", title: "t1", url: "https://x.com/1" }] },
+    updates: { count: 0, rows: [] },
+    removals: { count: 0, rows: [] },
+    unmatched_creators: { count: 1, rows: [{ raw_uid: "u1", reason: "UID 未在启用的达人库中找到", source_file: "a.xlsx" }] },
+    date_anomalies: { count: 0, rows: [] },
+  },
+};
+
+const previewResponseNoUnmatched = {
+  data: {
+    ...previewResponse.data,
+    unmatched_creators: { count: 0, rows: [] },
+  },
+};
+
+const batchesResponse = {
+  data: [
+    {
+      batch_id: 2,
+      mode: "REPLACE_MONTHS",
+      period_months: ["2026-01"],
+      source_files: ["a.xlsx"],
+      input_count: 2,
+      saved_count: 2,
+      removed_count: 1,
+      created_at: "2026-01-10T00:00:00Z",
+    },
+    {
+      batch_id: 1,
+      mode: "REPLACE_MONTHS",
+      period_months: ["2026-01"],
+      source_files: ["b.xlsx"],
+      input_count: 1,
+      saved_count: 1,
+      removed_count: 0,
+      created_at: "2026-01-01T00:00:00Z",
+    },
+  ],
+};
+
+const exclusionsResponse = {
+  data: [
+    {
+      id: 9,
+      platform: "tiktok",
+      url_key: "key-9",
+      original_url: "https://x.com/cross1",
+      normalized_url: "https://x.com/cross1",
+      reason: "异业活动",
+      active: 1,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    },
+  ],
+};
+
+const previewMock = vi.fn(async () => previewResponse);
+const confirmMock = vi.fn(async () => ({
+  data: { batch_id: 3, mode: "REPLACE_MONTHS", period_months: ["2026-01"], input_count: 2, saved_count: 2, removed_count: 1 },
+}));
+const rollbackMock = vi.fn(async () => ({ data: { batch_id: 2, restored_count: 1, removed_count: 2 } }));
+const importBatchesMock = vi.fn(async () => batchesResponse);
+const crossIndustryListMock = vi.fn(async () => exclusionsResponse);
+const crossIndustryMarkMock = vi.fn(async () => exclusionsResponse);
+const crossIndustryUnmarkMock = vi.fn(async () => ({ data: { deactivated: 1 } }));
+
+vi.mock("@/lib/endpoints", () => ({
+  importsApi: {
+    preview: (...args: Parameters<typeof previewMock>) => previewMock(...args),
+    confirm: (...args: Parameters<typeof confirmMock>) => confirmMock(...args),
+    rollback: (...args: Parameters<typeof rollbackMock>) => rollbackMock(...args),
+    crossIndustryList: (...args: Parameters<typeof crossIndustryListMock>) => crossIndustryListMock(...args),
+    crossIndustryMark: (...args: Parameters<typeof crossIndustryMarkMock>) => crossIndustryMarkMock(...args),
+    crossIndustryUnmark: (...args: Parameters<typeof crossIndustryUnmarkMock>) => crossIndustryUnmarkMock(...args),
+  },
+  dashboardApi: {
+    importBatches: (...args: Parameters<typeof importBatchesMock>) => importBatchesMock(...args),
+  },
+  authApi: { logout: vi.fn(async () => ({ data: { authenticated: false } })) },
+}));
+
+import ImportsPage from "@/app/imports/page";
+
+function fakeFile(name = "a.xlsx") {
+  return new File(["content"], name, { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+}
+
+beforeEach(() => {
+  previewMock.mockClear();
+  confirmMock.mockClear();
+  rollbackMock.mockClear();
+  importBatchesMock.mockClear();
+  crossIndustryListMock.mockClear();
+  crossIndustryMarkMock.mockClear();
+  crossIndustryUnmarkMock.mockClear();
+  previewMock.mockResolvedValue(previewResponse);
+});
+
+describe("ImportsPage", () => {
+  it("uploads a file and renders the preview diff categories", async () => {
+    const user = userEvent.setup();
+    renderWithQueryClient(<ImportsPage />);
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    await user.upload(fileInput, fakeFile());
+    await user.click(screen.getByRole("button", { name: "生成预览" }));
+
+    await waitFor(() => expect(previewMock).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("新增")).toBeInTheDocument();
+    expect(screen.getByText("更新")).toBeInTheDocument();
+    expect(screen.getByText("删除")).toBeInTheDocument();
+    expect(screen.getByText("未匹配达人")).toBeInTheDocument();
+    expect(screen.getByText("日期异常")).toBeInTheDocument();
+  });
+
+  it("disables the confirm button and explains why when unmatched creators exist", async () => {
+    const user = userEvent.setup();
+    renderWithQueryClient(<ImportsPage />);
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    await user.upload(fileInput, fakeFile());
+    await user.click(screen.getByRole("button", { name: "生成预览" }));
+
+    const confirmBtn = await screen.findByRole("button", { name: "确认导入（按月完整替换）" });
+    expect(confirmBtn).toBeDisabled();
+    expect(screen.getByText(/无法确认导入/)).toBeInTheDocument();
+  });
+
+  it("requires a second explicit confirmation before confirming an import", async () => {
+    previewMock.mockResolvedValueOnce(previewResponseNoUnmatched);
+    const user = userEvent.setup();
+    renderWithQueryClient(<ImportsPage />);
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    await user.upload(fileInput, fakeFile());
+    await user.click(screen.getByRole("button", { name: "生成预览" }));
+
+    const confirmBtn = await screen.findByRole("button", { name: "确认导入（按月完整替换）" });
+    expect(confirmBtn).toBeEnabled();
+    await user.click(confirmBtn);
+
+    const dialogConfirmBtn = screen.getByRole("button", { name: "确认执行" });
+    expect(dialogConfirmBtn).toBeDisabled();
+
+    await user.click(screen.getByRole("checkbox", { name: /我确认要执行本次按月完整替换导入/ }));
+    expect(dialogConfirmBtn).toBeEnabled();
+    await user.click(dialogConfirmBtn);
+
+    await waitFor(() => expect(confirmMock).toHaveBeenCalledTimes(1));
+    expect(confirmMock).toHaveBeenCalledWith("token-1", { mode: "replace_months" }, expect.objectContaining({ idempotencyKey: expect.any(String) }));
+  });
+
+  it("disables rollback for a non-most-recent batch and allows it for the latest one", async () => {
+    renderWithQueryClient(<ImportsPage />);
+    await waitFor(() => expect(importBatchesMock).toHaveBeenCalled());
+
+    await screen.findByText("#2");
+    const rollbackButtons = screen.getAllByRole("button", { name: "回滚" });
+    // batch #2 is the most recent for its month -> enabled; batch #1 is superseded -> disabled.
+    expect(rollbackButtons[0]).toBeEnabled();
+    expect(rollbackButtons[1]).toBeDisabled();
+  });
+
+  it("runs the rollback flow with a required reason and second confirmation", async () => {
+    const user = userEvent.setup();
+    renderWithQueryClient(<ImportsPage />);
+    await screen.findByText("#2");
+
+    const rollbackButtons = screen.getAllByRole("button", { name: "回滚" });
+    await user.click(rollbackButtons[0]);
+
+    const confirmRollbackBtn = screen.getByRole("button", { name: "确认回滚" });
+    expect(confirmRollbackBtn).toBeDisabled();
+
+    await user.type(screen.getByLabelText(/回滚原因/), "误导入需要回滚");
+    expect(confirmRollbackBtn).toBeDisabled();
+
+    await user.click(screen.getByRole("checkbox", { name: /我确认要回滚该批次/ }));
+    expect(confirmRollbackBtn).toBeEnabled();
+
+    await user.click(confirmRollbackBtn);
+    await waitFor(() => expect(rollbackMock).toHaveBeenCalledTimes(1));
+    expect(rollbackMock).toHaveBeenCalledWith(2, "误导入需要回滚", expect.objectContaining({ idempotencyKey: expect.any(String) }));
+  });
+
+  it("marks and unmarks cross-industry URLs", async () => {
+    const user = userEvent.setup();
+    renderWithQueryClient(<ImportsPage />);
+    await waitFor(() => expect(crossIndustryListMock).toHaveBeenCalled());
+
+    await user.type(
+      screen.getByPlaceholderText("粘贴一个或多个投稿链接，每行一个"),
+      "https://x.com/m1\nhttps://x.com/m2"
+    );
+    await user.click(screen.getByRole("button", { name: "标记为异业" }));
+    await waitFor(() => expect(crossIndustryMarkMock).toHaveBeenCalledTimes(1));
+    expect(crossIndustryMarkMock).toHaveBeenCalledWith(["https://x.com/m1", "https://x.com/m2"], expect.any(String));
+
+    await screen.findByText("https://x.com/cross1");
+    await user.click(screen.getByRole("button", { name: "取消标记" }));
+    await waitFor(() => expect(crossIndustryUnmarkMock).toHaveBeenCalledWith(9));
+  });
+
+  it("shows a unified error message when confirm fails", async () => {
+    previewMock.mockResolvedValueOnce(previewResponseNoUnmatched);
+    confirmMock.mockRejectedValueOnce(new ApiError(422, { code: "VALIDATION_ERROR", message: "存在未匹配的创建者。" }));
+    const user = userEvent.setup();
+    renderWithQueryClient(<ImportsPage />);
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    await user.upload(fileInput, fakeFile());
+    await user.click(screen.getByRole("button", { name: "生成预览" }));
+
+    const confirmBtn = await screen.findByRole("button", { name: "确认导入（按月完整替换）" });
+    await user.click(confirmBtn);
+    await user.click(screen.getByRole("checkbox", { name: /我确认要执行本次按月完整替换导入/ }));
+    await user.click(screen.getByRole("button", { name: "确认执行" }));
+
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("存在未匹配的创建者。"));
+  });
+});

@@ -618,7 +618,12 @@ class KOCRepository:
             and revision.affected_end_date >= month_start
         ]
 
-    def revert_contract_revision(self, revision_id: int) -> KOCRecord:
+    def revert_contract_revision(self, revision_id: int, *, reason: str | None = None) -> KOCRecord:
+        cleaned_reason = (reason or "").strip() or None
+        if reason is not None and cleaned_reason is None:
+            raise KOCRepositoryError("撤销原因不能为空。")
+        if cleaned_reason is not None and len(cleaned_reason) > 500:
+            raise KOCRepositoryError("撤销原因不能超过 500 个字符。")
         with connect(self.database_path) as connection:
             target = connection.execute(
                 "SELECT * FROM creator_contract_revision WHERE id = ?",
@@ -682,7 +687,7 @@ class KOCRepository:
                 affected_end_date=self._stored_contract_date(
                     target["affected_end_date"]
                 ),
-                reason=f"撤销合同修改 #{revision_id}",
+                reason=cleaned_reason or f"撤销合同修改 #{revision_id}",
                 reverted_revision_id=revision_id,
             )
             connection.execute(
@@ -1199,6 +1204,7 @@ class KOCRepository:
         sync_status: str,
         error_code: str | None,
         operator_mode: OperatorMode,
+        operator_name: str | None = None,
     ) -> None:
         connection.execute(
             """
@@ -1206,8 +1212,8 @@ class KOCRepository:
                 user_id, koc_name, old_follower_count, new_follower_count,
                 raw_display_value, source, source_url, fetched_at,
                 is_estimated, settlement_eligible, sync_status, error_code,
-                operator_mode
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                operator_mode, operator_name
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_id,
@@ -1223,6 +1229,7 @@ class KOCRepository:
                 sync_status,
                 error_code,
                 operator_mode.value,
+                operator_name,
             ),
         )
 
@@ -2664,6 +2671,7 @@ class KOCRepository:
         *,
         sync_status: FollowerSyncStatus = FollowerSyncStatus.SUCCESS,
         operator_mode: OperatorMode = OperatorMode.AUTOMATIC,
+        operator_name: str | None = None,
     ) -> KOCRecord:
         if not result.success:
             raise KOCRepositoryError("不能把失败的粉丝查询结果保存为成功。")
@@ -2754,6 +2762,7 @@ class KOCRepository:
                 sync_status=sync_status.value,
                 error_code=None,
                 operator_mode=operator_mode,
+                operator_name=operator_name,
             )
         updated = self.get(record_id)
         if updated is None:
@@ -2766,6 +2775,7 @@ class KOCRepository:
         result: FollowerFetchResult,
         *,
         operator_mode: OperatorMode = OperatorMode.AUTOMATIC,
+        operator_name: str | None = None,
     ) -> KOCRecord:
         current = self.get(record_id)
         if current is None:
@@ -2799,6 +2809,7 @@ class KOCRepository:
                 sync_status=FollowerSyncStatus.FAILED.value,
                 error_code=error_code,
                 operator_mode=operator_mode,
+                operator_name=operator_name,
             )
         updated = self.get(record_id)
         if updated is None:
@@ -2812,6 +2823,7 @@ class KOCRepository:
         *,
         sync_status: str = "SKIPPED",
         operator_mode: OperatorMode = OperatorMode.AUTOMATIC,
+        operator_name: str | None = None,
     ) -> None:
         current = self.get(record_id)
         if current is None:
@@ -2832,6 +2844,7 @@ class KOCRepository:
                 sync_status=sync_status,
                 error_code=result.error_code,
                 operator_mode=operator_mode,
+                operator_name=operator_name,
             )
 
     def list_follower_audit(self, user_id: str | None = None) -> pd.DataFrame:
