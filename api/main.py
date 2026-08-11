@@ -15,6 +15,7 @@ from ui.auth import password_matches
 from api.compensation import build_compensation_router
 from api.creators import build_creators_router
 from api.dashboard import build_dashboard_router
+from api.imports import build_imports_router
 from api.session_store import SessionStore
 
 SESSION_COOKIE_NAME = "koc_session"
@@ -178,6 +179,14 @@ def create_app(settings: Settings | None = None, *, environment: str | None = No
         require_session=Depends(require_session),
     )
     app.include_router(compensation_router)
+
+    imports_router = build_imports_router(
+        database_path=resolved_settings.database_path,
+        timezone=resolved_settings.timezone,
+        require_session=Depends(require_session),
+        session_context=Depends(get_session_context),
+    )
+    app.include_router(imports_router)
 
     @app.get("/api/health")
     def health() -> dict:

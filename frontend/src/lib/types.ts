@@ -198,6 +198,37 @@ export interface ImportBatch {
   created_at: string;
 }
 
+export interface ImportDiffBucket {
+  count: number;
+  rows: Record<string, unknown>[];
+}
+
+export interface ImportPreview {
+  preview_token: string;
+  input_row_count: number;
+  matched_row_count: number;
+  period_months: string[];
+  cross_industry_flagged_count: number;
+  column_warnings: string[];
+  additions: ImportDiffBucket;
+  updates: ImportDiffBucket;
+  removals: ImportDiffBucket;
+  unmatched_creators: ImportDiffBucket;
+  date_anomalies: ImportDiffBucket;
+}
+
+export interface CrossIndustryExclusion {
+  id: number;
+  platform: string;
+  url_key: string;
+  original_url: string;
+  normalized_url: string;
+  reason: string | null;
+  active: number;
+  created_at: string;
+  updated_at: string;
+}
+
 // --- Compensation ---
 
 export interface CompensationPeriod {

@@ -317,6 +317,34 @@ class DashboardRepository:
             removed_count = 0
             if replace_months and periods:
                 placeholders = ", ".join("?" for _ in periods)
+                # Immutable pre-replace snapshot (19.2.2): capture the full rows
+                # that are about to be overwritten, in the SAME transaction as
+                # the delete/insert below, so a later rollback can truly restore
+                # them (not merely delete the new batch's rows).
+                existing_rows = connection.execute(
+                    "SELECT record_key, source_file, publish_date, payload_json "
+                    "FROM dashboard_post "
+                    f"WHERE substr(publish_date, 1, 7) IN ({placeholders})",
+                    periods,
+                ).fetchall()
+                if existing_rows:
+                    connection.executemany(
+                        """
+                        INSERT INTO dashboard_import_batch_snapshot (
+                            batch_id, record_key, source_file, publish_date, payload_json
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        [
+                            (
+                                batch_id,
+                                row["record_key"],
+                                row["source_file"],
+                                row["publish_date"],
+                                row["payload_json"],
+                            )
+                            for row in existing_rows
+                        ],
+                    )
                 deleted = connection.execute(
                     "DELETE FROM dashboard_post "
                     f"WHERE substr(publish_date, 1, 7) IN ({placeholders})",
@@ -350,6 +378,95 @@ class DashboardRepository:
             removed_count=removed_count,
             batch_id=batch_id,
         )
+
+    def rollback_import_batch(self, batch_id: int) -> dict[str, int]:
+        """True atomic restore of the pre-replace snapshot for one batch (19.2.3).
+
+        Only the most recent REPLACE_MONTHS batch covering a given month may
+        be rolled back; a batch that has already been rolled back cannot be
+        rolled back again. Restoring deletes the current rows for the
+        batch's covered months, then re-inserts the saved snapshot rows —
+        never a delete-only operation.
+        """
+        with connect(self.database_path) as connection:
+            batch = connection.execute(
+                "SELECT id, mode, period_months_json, rolled_back_at "
+                "FROM dashboard_import_batch WHERE id = ?",
+                (batch_id,),
+            ).fetchone()
+            if batch is None:
+                raise ValueError(f"导入批次不存在：batch_id={batch_id}。")
+            if batch["mode"] != "REPLACE_MONTHS":
+                raise ValueError("该批次不是按月完整替换导入，无法回滚。")
+            if batch["rolled_back_at"]:
+                raise ValueError("该批次已经回滚过，请勿重复操作。")
+
+            periods = json.loads(batch["period_months_json"])
+            if periods:
+                period_set = set(periods)
+                newer_rows = connection.execute(
+                    "SELECT id, period_months_json FROM dashboard_import_batch "
+                    "WHERE id > ? AND mode = 'REPLACE_MONTHS' ORDER BY id",
+                    (batch_id,),
+                ).fetchall()
+                for row in newer_rows:
+                    other_periods = set(json.loads(row["period_months_json"]))
+                    if other_periods & period_set:
+                        raise ValueError(
+                            "存在更新的导入批次（batch_id="
+                            f"{int(row['id'])}），无法安全回滚，请联系管理员处理。"
+                        )
+
+            snapshot_rows = connection.execute(
+                "SELECT record_key, source_file, publish_date, payload_json "
+                "FROM dashboard_import_batch_snapshot WHERE batch_id = ?",
+                (batch_id,),
+            ).fetchall()
+
+            removed_count = 0
+            if periods:
+                placeholders = ", ".join("?" for _ in periods)
+                deleted = connection.execute(
+                    "DELETE FROM dashboard_post "
+                    f"WHERE substr(publish_date, 1, 7) IN ({placeholders})",
+                    periods,
+                )
+                removed_count = max(deleted.rowcount, 0)
+
+            if snapshot_rows:
+                connection.executemany(
+                    """
+                    INSERT INTO dashboard_post (
+                        record_key, source_file, publish_date, payload_json
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(record_key) DO UPDATE SET
+                        source_file = excluded.source_file,
+                        publish_date = excluded.publish_date,
+                        payload_json = excluded.payload_json,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    [
+                        (
+                            row["record_key"],
+                            row["source_file"],
+                            row["publish_date"],
+                            row["payload_json"],
+                        )
+                        for row in snapshot_rows
+                    ],
+                )
+
+            connection.execute(
+                "UPDATE dashboard_import_batch SET rolled_back_at = CURRENT_TIMESTAMP "
+                "WHERE id = ?",
+                (batch_id,),
+            )
+
+        return {
+            "batch_id": batch_id,
+            "restored_count": len(snapshot_rows),
+            "removed_count": removed_count,
+        }
 
     def list_import_batches(self, *, limit: int = 30) -> pd.DataFrame:
         with connect(self.database_path) as connection:

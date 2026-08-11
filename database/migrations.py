@@ -56,6 +56,7 @@ AUTHORITATIVE_CONTRACT_PERIODS_MIGRATION_ID = (
 )
 CONTRACT_REVISION_AUDIT_MIGRATION_ID = "v2.0_contract_revision_audit"
 AI_AGENT_STORAGE_MIGRATION_ID = "v2.1_ai_agent_storage"
+DASHBOARD_IMPORT_SNAPSHOT_MIGRATION_ID = "v2.2_dashboard_import_batch_snapshot"
 FOLLOWER_AUDIT_COLUMNS = (
     "id",
     "user_id",
@@ -992,6 +993,34 @@ def _create_commentary_compensation_storage(
     )
 
 
+def _create_dashboard_import_batch_snapshot(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dashboard_import_batch_snapshot (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id INTEGER NOT NULL,
+            record_key TEXT NOT NULL,
+            source_file TEXT NOT NULL,
+            publish_date TEXT,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (batch_id) REFERENCES dashboard_import_batch(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dashboard_import_snapshot_batch "
+        "ON dashboard_import_batch_snapshot(batch_id)"
+    )
+    batch_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(dashboard_import_batch)")
+    }
+    if "rolled_back_at" not in batch_columns:
+        connection.execute(
+            "ALTER TABLE dashboard_import_batch ADD COLUMN rolled_back_at TEXT"
+        )
+
+
 def _current_columns(connection: sqlite3.Connection) -> tuple[str, ...]:
     return tuple(
         str(row[1]) for row in connection.execute("PRAGMA table_info(koc_master)")
@@ -1335,6 +1364,8 @@ def apply_migrations(
     _record_migration(connection, CONTRACT_REVISION_AUDIT_MIGRATION_ID)
     _create_ai_agent_storage(connection)
     _record_migration(connection, AI_AGENT_STORAGE_MIGRATION_ID)
+    _create_dashboard_import_batch_snapshot(connection)
+    _record_migration(connection, DASHBOARD_IMPORT_SNAPSHOT_MIGRATION_ID)
 
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_koc_master_user_id ON koc_master(user_id)"

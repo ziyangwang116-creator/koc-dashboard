@@ -1,4 +1,4 @@
-import { apiClient, type WriteOptions } from "./api-client";
+import { apiClient, uploadMultipart, type WriteOptions } from "./api-client";
 import type {
   Creator,
   CreatorDetail,
@@ -10,6 +10,8 @@ import type {
   RankingCreatorItem,
   RankingVideoItem,
   ImportBatch,
+  ImportPreview,
+  CrossIndustryExclusion,
   ListMeta,
   CompensationPeriod,
   CompensationVersion,
@@ -132,4 +134,35 @@ export const compensationApi = {
       "/compensation/commentary/theme-submissions",
       params
     ),
+};
+
+export const importsApi = {
+  preview: (files: File[]) => uploadMultipart<{ data: ImportPreview }>("/imports/preview", files),
+  confirm: (previewToken: string, body: Record<string, unknown>, options?: WriteOptions) =>
+    apiClient.post<{
+      data: {
+        batch_id: number;
+        mode: string;
+        period_months: string[];
+        input_count: number;
+        saved_count: number;
+        removed_count: number;
+      };
+    }>(`/imports/${previewToken}/confirm`, body, undefined, options),
+  rollback: (batchId: number, reason: string, options?: WriteOptions) =>
+    apiClient.post<{ data: { batch_id: number; restored_count: number; removed_count: number } }>(
+      `/dashboard/import-batches/${batchId}/rollback`,
+      { reason },
+      undefined,
+      options
+    ),
+  crossIndustryList: () =>
+    apiClient.get<{ data: CrossIndustryExclusion[] }>("/cross-industry-exclusions"),
+  crossIndustryMark: (urls: string[], reason?: string) =>
+    apiClient.post<{ data: CrossIndustryExclusion[] }>("/cross-industry-exclusions", {
+      urls,
+      reason,
+    }),
+  crossIndustryUnmark: (id: number) =>
+    apiClient.delete<{ data: { deactivated: number } }>(`/cross-industry-exclusions/${id}`),
 };

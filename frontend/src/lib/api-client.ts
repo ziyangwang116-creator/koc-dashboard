@@ -113,3 +113,47 @@ export const apiClient = {
   delete: <T>(path: string, body?: unknown, options?: WriteOptions) =>
     request<T>(path, { method: "DELETE", body, headers: writeHeaders(options) }),
 };
+
+/** Multipart file upload — bypasses the JSON-only `request` helper because the
+ * body must be a FormData instance with no explicit Content-Type header
+ * (the browser sets the multipart boundary automatically). */
+export async function uploadMultipart<T>(
+  path: string,
+  files: File[],
+  fieldName = "files"
+): Promise<T> {
+  const form = new FormData();
+  for (const file of files) {
+    form.append(fieldName, file, file.name);
+  }
+  const url = buildUrl(path);
+  const res = await fetch(url, {
+    method: "POST",
+    credentials: "include",
+    body: form,
+  });
+
+  if (res.status === 401) {
+    unauthorizedHandler?.();
+  }
+
+  let json: unknown;
+  try {
+    json = await res.json();
+  } catch {
+    throw new ApiError(res.status, {
+      code: "INTERNAL_ERROR",
+      message: "服务器返回了无法解析的响应。",
+    });
+  }
+
+  if (!res.ok) {
+    const errPayload = (json as { error?: ApiErrorPayload }).error ?? {
+      code: "INTERNAL_ERROR",
+      message: "发生未知错误。",
+    };
+    throw new ApiError(res.status, errPayload);
+  }
+
+  return json as T;
+}
