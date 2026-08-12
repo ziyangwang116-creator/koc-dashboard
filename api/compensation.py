@@ -8,14 +8,21 @@ from fastapi import APIRouter, Body, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from core.commentary_compensation import (
+    COMMENTARY_COLUMNS,
     _video_url_key,
     calculate_commentary_compensation,
     commentary_contract_mode,
 )
 from core.cross_industry import exclude_cross_industry_posts
 from core.dashboard_processor import filter_dashboard_data
-from core.grassroot_compensation import calculate_grassroot_compensation
-from core.long_term_compensation import calculate_long_term_compensation
+from core.grassroot_compensation import (
+    COMPENSATION_COLUMNS,
+    calculate_grassroot_compensation,
+)
+from core.long_term_compensation import (
+    LONG_TERM_COMPENSATION_COLUMNS,
+    calculate_long_term_compensation,
+)
 from core.traffic_boost import is_july_traffic_boost_month
 from database.dashboard_repository import (
     DashboardRepository,
@@ -136,10 +143,402 @@ def _text_or_none(value: Any) -> str | None:
 
 
 def _split_contract_types(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple, set)):
+        return [str(part).strip() for part in value if str(part).strip()]
     text = _text_or_none(value)
     if not text or text in ("未匹配", "未设置"):
         return []
     return [part for part in text.split("、") if part]
+
+
+def _row_value(row: Any, *keys: str) -> Any:
+    for key in keys:
+        value = row.get(key)
+        if _none_if_na(value) is not None:
+            return value
+    return None
+
+
+def _contract_text(value: Any) -> str | None:
+    contract_types = _split_contract_types(value)
+    return "、".join(contract_types) if contract_types else None
+
+
+def _grassroot_api_row(row: Any) -> dict[str, Any]:
+    cross_lane = _row_value(row, "cross_lane")
+    if not isinstance(cross_lane, dict):
+        cross_types = _text_or_none(_row_value(row, "跨赛道类型"))
+        cross_lane = None
+        if cross_types:
+            cross_lane = {
+                "types": cross_types,
+                "post_count": _int_or_none(_row_value(row, "跨赛道活动投稿数")) or 0,
+                "original_views": _int_or_none(_row_value(row, "跨赛道原始播放量")) or 0,
+                "boosted_views": _int_or_none(_row_value(row, "跨赛道加成后播放量")) or 0,
+                "rank": _text_or_none(_row_value(row, "跨赛道 rank")),
+                "rank_reward_jpy": _int_or_none(_row_value(row, "跨赛道 rank金额")) or 0,
+                "post_reward_jpy": _int_or_none(_row_value(row, "跨赛道投稿数奖励")) or 0,
+                "amount_jpy": _int_or_none(_row_value(row, "跨赛道结算金额")) or 0,
+                "urls": [
+                    url
+                    for url in str(_row_value(row, "跨赛道视频链接") or "").split("\n")
+                    if url
+                ],
+            }
+
+    rewards = _row_value(row, "rewards_jpy")
+    if not isinstance(rewards, dict):
+        rewards = {}
+
+    return {
+        "creator_key": _row_value(row, "creator_key", "user_id"),
+        "creator_name": _row_value(row, "creator_name", "达人"),
+        "contract_types": _split_contract_types(
+            _row_value(row, "contract_types", "合同类型")
+        ),
+        "settlement_status": _row_value(row, "settlement_status", "结算状态"),
+        "rank": _text_or_none(_row_value(row, "rank")),
+        "settlement_subtype": _text_or_none(
+            _row_value(row, "settlement_subtype", "计费 subtype")
+        ),
+        "followers": _int_or_none(_row_value(row, "followers", "粉丝数")),
+        "youtube_followers": _int_or_none(
+            _row_value(row, "youtube_followers", "YouTube粉丝数")
+        ),
+        "tiktok_followers": _int_or_none(
+            _row_value(row, "tiktok_followers", "TikTok粉丝数")
+        ),
+        "billable_post_count": _int_or_none(
+            _row_value(row, "billable_post_count", "投稿数")
+        ) or 0,
+        "billable_views": _int_or_none(
+            _row_value(row, "billable_views", "计费播放量")
+        ) or 0,
+        "contract_billable_views": _int_or_none(
+            _row_value(row, "contract_billable_views", "合同内计费播放量")
+        ) or 0,
+        "all_video_views": _int_or_none(
+            _row_value(row, "all_video_views", "全部视频类型播放量")
+        ) or 0,
+        "cpm_views_no_boost": _int_or_none(
+            _row_value(row, "cpm_views_no_boost", "CPM计算播放量（无加成）")
+        ) or 0,
+        "cross_lane": cross_lane,
+        "rewards_jpy": {
+            "short_rank": _int_or_none(
+                rewards.get("short_rank", _row_value(row, "short rank金额"))
+            ) or 0,
+            "long_livestream_rank": _int_or_none(
+                rewards.get(
+                    "long_livestream_rank",
+                    _row_value(row, "long+livestreamrank金额"),
+                )
+            ) or 0,
+            "short_post": _int_or_none(
+                rewards.get("short_post", _row_value(row, "short 投稿数奖励"))
+            ) or 0,
+            "long_livestream_post": _int_or_none(
+                rewards.get(
+                    "long_livestream_post",
+                    _row_value(row, "long+livestream投稿数奖励"),
+                )
+            ) or 0,
+        },
+        "total_amount_jpy": _int_or_none(
+            _row_value(row, "total_amount_jpy", "总金额（日元）")
+        ) or 0,
+        "creator_receivable_jpy": _int_or_none(
+            _row_value(
+                row,
+                "creator_receivable_jpy",
+                "博主应收（日元）(包含15$手续费)",
+            )
+        ) or 0,
+        "youdao_receivable_jpy": _int_or_none(
+            _row_value(
+                row,
+                "youdao_receivable_jpy",
+                "有道应收（日元）（包含服务费）",
+            )
+        ) or 0,
+        "creator_receivable_usd": _float_or_none(
+            _row_value(row, "creator_receivable_usd", "博主应收（美元）")
+        ) or 0.0,
+        "youdao_receivable_usd": _float_or_none(
+            _row_value(
+                row,
+                "youdao_receivable_usd",
+                "有道应收（美元）（包含服务费）",
+            )
+        ) or 0.0,
+        "cpm": _float_or_none(_row_value(row, "cpm", "CPM")),
+    }
+
+
+def _long_term_api_row(row: Any) -> dict[str, Any]:
+    return {
+        "record_id": _int_or_none(_row_value(row, "record_id", "记录ID")),
+        "creator_key": _row_value(row, "creator_key", "user_id"),
+        "creator_name": _row_value(row, "creator_name", "达人"),
+        "contract_types": _split_contract_types(
+            _row_value(row, "contract_types", "合同类型")
+        ),
+        "contract_start_date": _text_or_none(
+            _row_value(row, "contract_start_date", "合同开始日期")
+        ),
+        "contract_end_date": _text_or_none(
+            _row_value(row, "contract_end_date", "合同截止日期")
+        ),
+        "settlement_status": _row_value(row, "settlement_status", "结算状态"),
+        "rank": _text_or_none(_row_value(row, "rank")),
+        "followers": _int_or_none(_row_value(row, "followers", "粉丝数")),
+        "youtube_post_count": _int_or_none(
+            _row_value(row, "youtube_post_count", "YouTube 投稿数")
+        ) or 0,
+        "monthly_new_post_views": _int_or_none(
+            _row_value(row, "monthly_new_post_views", "月度新投稿播放量")
+        ) or 0,
+        "cpm_views_no_boost": _int_or_none(
+            _row_value(row, "cpm_views_no_boost", "CPM计算播放量（无加成）")
+        ) or 0,
+        "monthly_activity_count": _int_or_none(
+            _row_value(row, "monthly_activity_count", "每月活动数")
+        ),
+        "activity_threshold": _int_or_none(
+            _row_value(row, "activity_threshold", "活动数门槛")
+        ),
+        "rank_reward_jpy": _int_or_none(
+            _row_value(row, "rank_reward_jpy", "rank金额")
+        ) or 0,
+        "expected_cpm_jpy": _int_or_none(
+            _row_value(row, "expected_cpm_jpy", "预计 CPM（日元）")
+        ),
+        "total_amount_jpy": _int_or_none(
+            _row_value(row, "total_amount_jpy", "总金额（日元）")
+        ) or 0,
+        "creator_receivable_jpy": _int_or_none(
+            _row_value(
+                row,
+                "creator_receivable_jpy",
+                "博主应收（日元）(包含15$手续费)",
+            )
+        ) or 0,
+        "youdao_receivable_jpy": _int_or_none(
+            _row_value(
+                row,
+                "youdao_receivable_jpy",
+                "有道应收（日元）（包含服务费）",
+            )
+        ) or 0,
+        "creator_receivable_usd": _float_or_none(
+            _row_value(row, "creator_receivable_usd", "博主应收（美元）")
+        ) or 0.0,
+        "youdao_receivable_usd": _float_or_none(
+            _row_value(
+                row,
+                "youdao_receivable_usd",
+                "有道应收（美元）（包含服务费）",
+            )
+        ) or 0.0,
+        "cpm": _float_or_none(_row_value(row, "cpm", "CPM")),
+    }
+
+
+def _commentary_api_row(row: Any) -> dict[str, Any]:
+    mappings = {
+        "creator_id": ("creator_id",),
+        "creator_key": ("creator_key", "UID"),
+        "creator_name": ("creator_name", "达人"),
+        "settlement_status": ("settlement_status", "结算状态"),
+        "youtube_uid": ("youtube_uid", "YouTube UID"),
+        "youtube_followers": ("youtube_followers", "YouTube粉丝数"),
+        "tiktok_uid": ("tiktok_uid", "TikTok UID"),
+        "tiktok_followers": ("tiktok_followers", "TikTok粉丝数"),
+        "short_platform": ("short_platform", "短视频平台"),
+        "long_views": ("long_views", "长视频播放量"),
+        "long_view_rank": ("long_view_rank", "长视频播放等级"),
+        "long_follower_cap_rank": ("long_follower_cap_rank", "长视频粉丝上限等级"),
+        "long_final_rank": ("long_final_rank", "长视频最终等级"),
+        "long_reward_jpy": ("long_reward_jpy", "长视频报酬（日元）"),
+        "short_views": ("short_views", "短视频播放量"),
+        "short_view_rank": ("short_view_rank", "短视频播放等级"),
+        "short_follower_cap_rank": ("short_follower_cap_rank", "短视频粉丝上限等级"),
+        "short_final_rank": ("short_final_rank", "短视频最终等级"),
+        "short_reward_jpy": ("short_reward_jpy", "短视频报酬（日元）"),
+        "combined_bonus_rank": ("combined_bonus_rank", "并用奖金等级"),
+        "combined_bonus_jpy": ("combined_bonus_jpy", "并用奖金（日元）"),
+        "designated_theme_count": ("designated_theme_count", "指定主题件数"),
+        "designated_theme_reward_jpy": (
+            "designated_theme_reward_jpy",
+            "指定主题报酬（日元）",
+        ),
+        "all_paid_views": ("all_paid_views", "全部已付费内容播放量"),
+        "total_jpy_tax_incl": ("total_jpy_tax_incl", "解说含税总额（日元）"),
+        "creator_receivable_jpy": (
+            "creator_receivable_jpy",
+            "博主应收（日元）(包含15$手续费)",
+        ),
+        "youdao_receivable_jpy": (
+            "youdao_receivable_jpy",
+            "有道应收（日元）（包含服务费）",
+        ),
+        "creator_receivable_usd": ("creator_receivable_usd", "博主应收（美元）"),
+        "youdao_receivable_usd": (
+            "youdao_receivable_usd",
+            "有道应收（美元）（包含服务费）",
+        ),
+        "cpm": ("cpm", "CPM"),
+    }
+    result = {key: _row_value(row, *keys) for key, keys in mappings.items()}
+    result["creator_id"] = _int_or_none(result["creator_id"])
+    result["contract_types"] = _split_contract_types(
+        _row_value(row, "contract_types", "合同类型")
+    )
+    integer_fields = {
+        "youtube_followers",
+        "tiktok_followers",
+        "long_views",
+        "long_reward_jpy",
+        "short_views",
+        "short_reward_jpy",
+        "combined_bonus_jpy",
+        "designated_theme_count",
+        "designated_theme_reward_jpy",
+        "all_paid_views",
+        "total_jpy_tax_incl",
+        "creator_receivable_jpy",
+        "youdao_receivable_jpy",
+    }
+    for field in integer_fields:
+        result[field] = _int_or_none(result[field]) or 0
+    result["creator_receivable_usd"] = _float_or_none(
+        result["creator_receivable_usd"]
+    ) or 0.0
+    result["youdao_receivable_usd"] = _float_or_none(
+        result["youdao_receivable_usd"]
+    ) or 0.0
+    result["cpm"] = _float_or_none(result["cpm"])
+    return result
+
+
+def _legacy_grassroot_row(row: Any) -> dict[str, Any]:
+    api_row = _grassroot_api_row(row)
+    cross_lane = api_row.get("cross_lane") or {}
+    rewards = api_row["rewards_jpy"]
+    return {
+        "user_id": api_row["creator_key"],
+        "达人": api_row["creator_name"],
+        "合同类型": _contract_text(api_row["contract_types"]),
+        "粉丝数": api_row["followers"],
+        "YouTube粉丝数": api_row["youtube_followers"],
+        "TikTok粉丝数": api_row["tiktok_followers"],
+        "计费 subtype": api_row["settlement_subtype"],
+        "合同内计费播放量": api_row["contract_billable_views"],
+        "跨赛道类型": cross_lane.get("types"),
+        "跨赛道活动投稿数": cross_lane.get("post_count", 0),
+        "跨赛道原始播放量": cross_lane.get("original_views", 0),
+        "跨赛道加成后播放量": cross_lane.get("boosted_views", 0),
+        "跨赛道 rank": cross_lane.get("rank"),
+        "跨赛道 rank金额": cross_lane.get("rank_reward_jpy", 0),
+        "跨赛道投稿数奖励": cross_lane.get("post_reward_jpy", 0),
+        "跨赛道结算金额": cross_lane.get("amount_jpy", 0),
+        "跨赛道视频链接": "\n".join(cross_lane.get("urls", [])),
+        "计费播放量": api_row["billable_views"],
+        "全部视频类型播放量": api_row["all_video_views"],
+        "CPM计算播放量（无加成）": api_row["cpm_views_no_boost"],
+        "投稿数": api_row["billable_post_count"],
+        "结算状态": api_row["settlement_status"],
+        "rank": api_row["rank"],
+        "short rank金额": rewards["short_rank"],
+        "long+livestreamrank金额": rewards["long_livestream_rank"],
+        "short 投稿数奖励": rewards["short_post"],
+        "long+livestream投稿数奖励": rewards["long_livestream_post"],
+        "总金额（日元）": api_row["total_amount_jpy"],
+        "博主应收（日元）(包含15$手续费)": api_row["creator_receivable_jpy"],
+        "有道应收（日元）（包含服务费）": api_row["youdao_receivable_jpy"],
+        "博主应收（美元）": api_row["creator_receivable_usd"],
+        "有道应收（美元）（包含服务费）": api_row["youdao_receivable_usd"],
+        "CPM": api_row["cpm"],
+    }
+
+
+def _legacy_long_term_row(row: Any) -> dict[str, Any]:
+    api_row = _long_term_api_row(row)
+    mapping = {
+        "记录ID": "record_id",
+        "user_id": "creator_key",
+        "达人": "creator_name",
+        "合同开始日期": "contract_start_date",
+        "合同截止日期": "contract_end_date",
+        "粉丝数": "followers",
+        "YouTube 投稿数": "youtube_post_count",
+        "月度新投稿播放量": "monthly_new_post_views",
+        "CPM计算播放量（无加成）": "cpm_views_no_boost",
+        "每月活动数": "monthly_activity_count",
+        "活动数门槛": "activity_threshold",
+        "结算状态": "settlement_status",
+        "rank": "rank",
+        "rank金额": "rank_reward_jpy",
+        "预计 CPM（日元）": "expected_cpm_jpy",
+        "总金额（日元）": "total_amount_jpy",
+        "博主应收（日元）(包含15$手续费)": "creator_receivable_jpy",
+        "有道应收（日元）（包含服务费）": "youdao_receivable_jpy",
+        "博主应收（美元）": "creator_receivable_usd",
+        "有道应收（美元）（包含服务费）": "youdao_receivable_usd",
+        "CPM": "cpm",
+    }
+    result = {legacy: api_row[api] for legacy, api in mapping.items()}
+    result["合同类型"] = _contract_text(api_row["contract_types"])
+    return result
+
+
+def _legacy_commentary_row(row: Any) -> dict[str, Any]:
+    api_row = _commentary_api_row(row)
+    mapping = {
+        "creator_id": "creator_id",
+        "UID": "creator_key",
+        "达人": "creator_name",
+        "结算状态": "settlement_status",
+        "YouTube UID": "youtube_uid",
+        "YouTube粉丝数": "youtube_followers",
+        "TikTok UID": "tiktok_uid",
+        "TikTok粉丝数": "tiktok_followers",
+        "短视频平台": "short_platform",
+        "长视频播放量": "long_views",
+        "长视频播放等级": "long_view_rank",
+        "长视频粉丝上限等级": "long_follower_cap_rank",
+        "长视频最终等级": "long_final_rank",
+        "长视频报酬（日元）": "long_reward_jpy",
+        "短视频播放量": "short_views",
+        "短视频播放等级": "short_view_rank",
+        "短视频粉丝上限等级": "short_follower_cap_rank",
+        "短视频最终等级": "short_final_rank",
+        "短视频报酬（日元）": "short_reward_jpy",
+        "并用奖金等级": "combined_bonus_rank",
+        "并用奖金（日元）": "combined_bonus_jpy",
+        "指定主题件数": "designated_theme_count",
+        "指定主题报酬（日元）": "designated_theme_reward_jpy",
+        "全部已付费内容播放量": "all_paid_views",
+        "解说含税总额（日元）": "total_jpy_tax_incl",
+        "博主应收（日元）(包含15$手续费)": "creator_receivable_jpy",
+        "有道应收（日元）（包含服务费）": "youdao_receivable_jpy",
+        "博主应收（美元）": "creator_receivable_usd",
+        "有道应收（美元）（包含服务费）": "youdao_receivable_usd",
+        "CPM": "cpm",
+    }
+    result = {legacy: api_row[api] for legacy, api in mapping.items()}
+    result["合同类型"] = _contract_text(api_row["contract_types"])
+    return result
+
+
+def _legacy_details(lane: str, rows: list[dict[str, Any]]) -> pd.DataFrame:
+    converters = {
+        "grassroot": (_legacy_grassroot_row, COMPENSATION_COLUMNS),
+        "long-term": (_legacy_long_term_row, LONG_TERM_COMPENSATION_COLUMNS),
+        "commentary": (_legacy_commentary_row, COMMENTARY_COLUMNS),
+    }
+    converter, columns = converters[lane]
+    return pd.DataFrame([converter(row) for row in rows], columns=columns)
 
 
 def _paginate(
@@ -245,7 +644,9 @@ def _serialize_version(version) -> dict:
     if details is None or (hasattr(details, "empty") and details.empty):
         details_records: list[dict] = []
     else:
-        details_records = details.to_dict("records")
+        details_records = (
+            details.astype("object").where(pd.notna(details), None).to_dict("records")
+        )
     return {
         "id": version.id,
         "period_month": version.period_month,
@@ -475,68 +876,19 @@ def build_compensation_router(
 
         rows: list[dict] = []
         for _, row in details.iterrows():
-            status = row.get("结算状态")
+            api_row = _grassroot_api_row(row)
+            status = api_row["settlement_status"]
             if settlement_status and status not in settlement_status:
                 continue
-            creator_key = row.get("user_id")
-            creator_name = row.get("达人")
+            creator_key = api_row["creator_key"]
+            creator_name = api_row["creator_name"]
             if q:
                 query = q.strip().casefold()
                 if query and query not in str(creator_key or "").casefold() and query not in str(
                     creator_name or ""
                 ).casefold():
                     continue
-
-            cross_types = _text_or_none(row.get("跨赛道类型"))
-            cross_lane = None
-            if cross_types:
-                cross_lane = {
-                    "types": cross_types,
-                    "post_count": _int_or_none(row.get("跨赛道活动投稿数")) or 0,
-                    "original_views": _int_or_none(row.get("跨赛道原始播放量")) or 0,
-                    "boosted_views": _int_or_none(row.get("跨赛道加成后播放量")) or 0,
-                    "rank": _text_or_none(row.get("跨赛道 rank")),
-                    "rank_reward_jpy": _int_or_none(row.get("跨赛道 rank金额")) or 0,
-                    "post_reward_jpy": _int_or_none(row.get("跨赛道投稿数奖励")) or 0,
-                    "amount_jpy": _int_or_none(row.get("跨赛道结算金额")) or 0,
-                    "urls": [
-                        url
-                        for url in str(row.get("跨赛道视频链接") or "").split("\n")
-                        if url
-                    ],
-                }
-
-            rows.append(
-                {
-                    "creator_key": creator_key,
-                    "creator_name": creator_name,
-                    "contract_types": _split_contract_types(row.get("合同类型")),
-                    "settlement_status": status,
-                    "rank": _text_or_none(row.get("rank")),
-                    "settlement_subtype": _text_or_none(row.get("计费 subtype")),
-                    "followers": _int_or_none(row.get("粉丝数")),
-                    "youtube_followers": _int_or_none(row.get("YouTube粉丝数")),
-                    "tiktok_followers": _int_or_none(row.get("TikTok粉丝数")),
-                    "billable_post_count": _int_or_none(row.get("投稿数")) or 0,
-                    "billable_views": _int_or_none(row.get("计费播放量")) or 0,
-                    "contract_billable_views": _int_or_none(row.get("合同内计费播放量")) or 0,
-                    "all_video_views": _int_or_none(row.get("全部视频类型播放量")) or 0,
-                    "cpm_views_no_boost": _int_or_none(row.get("CPM计算播放量（无加成）")) or 0,
-                    "cross_lane": cross_lane,
-                    "rewards_jpy": {
-                        "short_rank": _int_or_none(row.get("short rank金额")) or 0,
-                        "long_livestream_rank": _int_or_none(row.get("long+livestreamrank金额")) or 0,
-                        "short_post": _int_or_none(row.get("short 投稿数奖励")) or 0,
-                        "long_livestream_post": _int_or_none(row.get("long+livestream投稿数奖励")) or 0,
-                    },
-                    "total_amount_jpy": _int_or_none(row.get("总金额（日元）")) or 0,
-                    "creator_receivable_jpy": _int_or_none(row.get("博主应收（日元）(包含15$手续费)")) or 0,
-                    "youdao_receivable_jpy": _int_or_none(row.get("有道应收（日元）（包含服务费）")) or 0,
-                    "creator_receivable_usd": _float_or_none(row.get("博主应收（美元）")) or 0.0,
-                    "youdao_receivable_usd": _float_or_none(row.get("有道应收（美元）（包含服务费）")) or 0.0,
-                    "cpm": _float_or_none(row.get("CPM")),
-                }
-            )
+            rows.append(api_row)
 
         reverse = sort.startswith("-")
         sort_field = sort[1:] if reverse else sort
@@ -653,44 +1005,19 @@ def build_compensation_router(
 
         rows: list[dict] = []
         for _, row in details.iterrows():
-            status = row.get("结算状态")
+            api_row = _long_term_api_row(row)
+            status = api_row["settlement_status"]
             if settlement_status and status not in settlement_status:
                 continue
-            creator_key = row.get("user_id")
-            creator_name = row.get("达人")
+            creator_key = api_row["creator_key"]
+            creator_name = api_row["creator_name"]
             if q:
                 query = q.strip().casefold()
                 if query and query not in str(creator_key or "").casefold() and query not in str(
                     creator_name or ""
                 ).casefold():
                     continue
-
-            rows.append(
-                {
-                    "record_id": _int_or_none(row.get("记录ID")),
-                    "creator_key": creator_key,
-                    "creator_name": creator_name,
-                    "contract_types": _split_contract_types(row.get("合同类型")),
-                    "contract_start_date": _text_or_none(row.get("合同开始日期")),
-                    "contract_end_date": _text_or_none(row.get("合同截止日期")),
-                    "settlement_status": status,
-                    "rank": _text_or_none(row.get("rank")),
-                    "followers": _int_or_none(row.get("粉丝数")),
-                    "youtube_post_count": _int_or_none(row.get("YouTube 投稿数")) or 0,
-                    "monthly_new_post_views": _int_or_none(row.get("月度新投稿播放量")) or 0,
-                    "cpm_views_no_boost": _int_or_none(row.get("CPM计算播放量（无加成）")) or 0,
-                    "monthly_activity_count": _int_or_none(row.get("每月活动数")),
-                    "activity_threshold": _int_or_none(row.get("活动数门槛")),
-                    "rank_reward_jpy": _int_or_none(row.get("rank金额")) or 0,
-                    "expected_cpm_jpy": _int_or_none(row.get("预计 CPM（日元）")),
-                    "total_amount_jpy": _int_or_none(row.get("总金额（日元）")) or 0,
-                    "creator_receivable_jpy": _int_or_none(row.get("博主应收（日元）(包含15$手续费)")) or 0,
-                    "youdao_receivable_jpy": _int_or_none(row.get("有道应收（日元）（包含服务费）")) or 0,
-                    "creator_receivable_usd": _float_or_none(row.get("博主应收（美元）")) or 0.0,
-                    "youdao_receivable_usd": _float_or_none(row.get("有道应收（美元）（包含服务费）")) or 0.0,
-                    "cpm": _float_or_none(row.get("CPM")),
-                }
-            )
+            rows.append(api_row)
 
         reverse = sort.startswith("-")
         sort_field = sort[1:] if reverse else sort
@@ -795,53 +1122,19 @@ def build_compensation_router(
 
         rows: list[dict] = []
         for _, row in details.iterrows():
-            status = row.get("结算状态")
+            api_row = _commentary_api_row(row)
+            status = api_row["settlement_status"]
             if settlement_status and status not in settlement_status:
                 continue
-            creator_key = row.get("UID")
-            creator_name = row.get("达人")
+            creator_key = api_row["creator_key"]
+            creator_name = api_row["creator_name"]
             if q:
                 query = q.strip().casefold()
                 if query and query not in str(creator_key or "").casefold() and query not in str(
                     creator_name or ""
                 ).casefold():
                     continue
-
-            rows.append(
-                {
-                    "creator_id": _int_or_none(row.get("creator_id")),
-                    "creator_key": creator_key,
-                    "creator_name": creator_name,
-                    "contract_types": _split_contract_types(row.get("合同类型")),
-                    "settlement_status": status,
-                    "youtube_uid": _text_or_none(row.get("YouTube UID")),
-                    "youtube_followers": _int_or_none(row.get("YouTube粉丝数")),
-                    "tiktok_uid": _text_or_none(row.get("TikTok UID")),
-                    "tiktok_followers": _int_or_none(row.get("TikTok粉丝数")),
-                    "short_platform": _text_or_none(row.get("短视频平台")),
-                    "long_views": _int_or_none(row.get("长视频播放量")) or 0,
-                    "long_view_rank": _text_or_none(row.get("长视频播放等级")),
-                    "long_follower_cap_rank": _text_or_none(row.get("长视频粉丝上限等级")),
-                    "long_final_rank": _text_or_none(row.get("长视频最终等级")),
-                    "long_reward_jpy": _int_or_none(row.get("长视频报酬（日元）")) or 0,
-                    "short_views": _int_or_none(row.get("短视频播放量")) or 0,
-                    "short_view_rank": _text_or_none(row.get("短视频播放等级")),
-                    "short_follower_cap_rank": _text_or_none(row.get("短视频粉丝上限等级")),
-                    "short_final_rank": _text_or_none(row.get("短视频最终等级")),
-                    "short_reward_jpy": _int_or_none(row.get("短视频报酬（日元）")) or 0,
-                    "combined_bonus_rank": _text_or_none(row.get("并用奖金等级")),
-                    "combined_bonus_jpy": _int_or_none(row.get("并用奖金（日元）")) or 0,
-                    "designated_theme_count": _int_or_none(row.get("指定主题件数")) or 0,
-                    "designated_theme_reward_jpy": _int_or_none(row.get("指定主题报酬（日元）")) or 0,
-                    "all_paid_views": _int_or_none(row.get("全部已付费内容播放量")) or 0,
-                    "total_jpy_tax_incl": _int_or_none(row.get("解说含税总额（日元）")) or 0,
-                    "creator_receivable_jpy": _int_or_none(row.get("博主应收（日元）(包含15$手续费)")) or 0,
-                    "youdao_receivable_jpy": _int_or_none(row.get("有道应收（日元）（包含服务费）")) or 0,
-                    "creator_receivable_usd": _float_or_none(row.get("博主应收（美元）")) or 0.0,
-                    "youdao_receivable_usd": _float_or_none(row.get("有道应收（美元）（包含服务费）")) or 0.0,
-                    "cpm": _float_or_none(row.get("CPM")),
-                }
-            )
+            rows.append(api_row)
 
         sort_key_map = {"total_amount_jpy": "total_jpy_tax_incl"}
         reverse = sort.startswith("-")
@@ -1127,6 +1420,7 @@ def build_compensation_router(
     def _version_track(
         *,
         prefix: str,
+        lane: str,
         create_method: str,
         update_method: str,
         lock_method: str,
@@ -1154,7 +1448,7 @@ def build_compensation_router(
             note = clean.get("note")
 
             def execute() -> tuple[int, dict]:
-                details_df = pd.DataFrame(details_rows)
+                details_df = _legacy_details(lane, details_rows)
                 repository = _repository()
                 create_fn = getattr(repository, create_method)
                 try:
@@ -1197,7 +1491,7 @@ def build_compensation_router(
                 jpy_to_usd_rate = float(clean.get("jpy_to_usd_rate"))
             except (TypeError, ValueError) as exc:
                 raise validation_error("jpy_to_usd_rate 是必填字段，须为大于 0 的数字。", "jpy_to_usd_rate") from exc
-            details_df = pd.DataFrame(details_rows)
+            details_df = _legacy_details(lane, details_rows)
             update_fn = getattr(repository, update_method)
             try:
                 updated = update_fn(
@@ -1240,6 +1534,7 @@ def build_compensation_router(
 
     _version_track(
         prefix="/api/compensation/grassroot",
+        lane="grassroot",
         create_method="create_compensation_draft",
         update_method="update_compensation_draft",
         lock_method="lock_compensation_version",
@@ -1247,6 +1542,7 @@ def build_compensation_router(
     )
     _version_track(
         prefix="/api/compensation/long-term",
+        lane="long-term",
         create_method="create_long_term_compensation_draft",
         update_method="update_long_term_compensation_draft",
         lock_method="lock_long_term_compensation_version",
@@ -1254,6 +1550,7 @@ def build_compensation_router(
     )
     _version_track(
         prefix="/api/compensation/commentary",
+        lane="commentary",
         create_method="create_commentary_compensation_draft",
         update_method="update_commentary_compensation_draft",
         lock_method="lock_commentary_compensation_version",

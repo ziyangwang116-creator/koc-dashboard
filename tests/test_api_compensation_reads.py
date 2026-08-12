@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
 
 from api.main import create_app
@@ -413,6 +414,125 @@ def test_versions_and_frozen_mode(tmp_path):
     assert frozen_body["meta"]["mode"] == "frozen"
     assert frozen_body["meta"]["version"]["status"] == "LOCKED"
     assert frozen_body["data"][0]["total_amount_jpy"] == 1000
+
+
+@pytest.mark.parametrize(
+    ("lane", "create_method", "row", "expected_amount_key", "expected_amount"),
+    [
+        (
+            "grassroot",
+            "create_compensation_draft",
+            {
+                "creator_key": "english-grassroot",
+                "creator_name": "English Grassroot",
+                "contract_types": ["TT"],
+                "settlement_status": "可结算",
+                "rank": "D",
+                "billable_views": 250000,
+                "all_video_views": 250000,
+                "total_amount_jpy": 100000,
+                "creator_receivable_jpy": 102500,
+                "youdao_receivable_jpy": 117875,
+                "creator_receivable_usd": 635.5,
+                "youdao_receivable_usd": 730.825,
+                "cpm": 2.9233,
+            },
+            "total_amount_jpy",
+            100000,
+        ),
+        (
+            "long-term",
+            "create_long_term_compensation_draft",
+            {
+                "record_id": 2,
+                "creator_key": "english-long-term",
+                "creator_name": "English Long Term",
+                "contract_types": ["YTB"],
+                "settlement_status": "可结算",
+                "rank": "D",
+                "monthly_new_post_views": 100000,
+                "monthly_activity_count": 1,
+                "total_amount_jpy": 100000,
+                "creator_receivable_jpy": 102500,
+                "youdao_receivable_jpy": 117875,
+                "creator_receivable_usd": 635.5,
+                "youdao_receivable_usd": 730.825,
+                "cpm": 7.30825,
+            },
+            "total_amount_jpy",
+            100000,
+        ),
+        (
+            "commentary",
+            "create_commentary_compensation_draft",
+            {
+                "creator_id": 3,
+                "creator_key": "english-commentary",
+                "creator_name": "English Commentary",
+                "contract_types": ["YTB长+TT"],
+                "settlement_status": "可结算",
+                "long_views": 8000,
+                "long_final_rank": "D",
+                "long_reward_jpy": 12000,
+                "short_views": 16000,
+                "short_final_rank": "D",
+                "short_reward_jpy": 10000,
+                "all_paid_views": 24000,
+                "total_jpy_tax_incl": 22000,
+                "creator_receivable_jpy": 24500,
+                "youdao_receivable_jpy": 28175,
+                "creator_receivable_usd": 151.9,
+                "youdao_receivable_usd": 174.685,
+                "cpm": 7.2785,
+            },
+            "total_jpy_tax_incl",
+            22000,
+        ),
+    ],
+)
+def test_existing_english_snapshot_rows_remain_readable(
+    tmp_path,
+    lane,
+    create_method,
+    row,
+    expected_amount_key,
+    expected_amount,
+):
+    database_path = tmp_path / "koc.db"
+    repository = DashboardRepository(database_path)
+    version = getattr(repository, create_method)(
+        "2026-06",
+        jpy_to_usd_rate=0.0062,
+        details=pd.DataFrame([row]),
+        summary={
+            "total_amount_jpy": expected_amount,
+            "creator_receivable_jpy": row["creator_receivable_jpy"],
+            "youdao_receivable_jpy": row["youdao_receivable_jpy"],
+            "creator_receivable_usd": row["creator_receivable_usd"],
+            "youdao_receivable_usd": row["youdao_receivable_usd"],
+            "settled_views": row.get(
+                "billable_views",
+                row.get("monthly_new_post_views", row.get("all_paid_views", 0)),
+            ),
+            "total_video_views": row.get(
+                "all_video_views",
+                row.get("monthly_new_post_views", row.get("all_paid_views", 0)),
+            ),
+            "overall_cpm": row["cpm"],
+        },
+        note="legacy English API snapshot",
+    )
+    client = _authenticated_client(database_path)
+
+    response = client.get(
+        f"/api/compensation/{lane}",
+        params={"period_month": "2026-06", "version_id": version.id, "page_size": 100},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data"][0]["creator_name"] == row["creator_name"]
+    assert body["data"][0][expected_amount_key] == expected_amount
 
 
 def test_versions_invalid_category(tmp_path):

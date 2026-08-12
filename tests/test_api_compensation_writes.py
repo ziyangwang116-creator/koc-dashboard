@@ -279,6 +279,158 @@ def test_create_draft_success(tmp_path):
     assert body["version_no"] == 1
 
 
+@pytest.mark.parametrize(
+    ("lane", "category", "row", "legacy_name_column", "amount_column"),
+    [
+        (
+            "grassroot",
+            "GRASSROOT",
+            {
+                "creator_key": "grassroot-1",
+                "creator_name": "Grassroot One",
+                "contract_types": ["YTB shorts"],
+                "settlement_status": "可结算",
+                "rank": "C",
+                "billable_post_count": 10,
+                "billable_views": 800000,
+                "all_video_views": 900000,
+                "rewards_jpy": {
+                    "short_rank": 300000,
+                    "long_livestream_rank": 0,
+                    "short_post": 15000,
+                    "long_livestream_post": 0,
+                },
+                "total_amount_jpy": 315000,
+                "creator_receivable_jpy": 317500,
+                "youdao_receivable_jpy": 365125,
+                "creator_receivable_usd": 1968.5,
+                "youdao_receivable_usd": 2263.775,
+                "cpm": 2.5153,
+            },
+            "达人",
+            "总金额（日元）",
+        ),
+        (
+            "long-term",
+            "LONG_TERM",
+            {
+                "record_id": 2,
+                "creator_key": "long-term-1",
+                "creator_name": "Long Term One",
+                "contract_types": ["YTB"],
+                "settlement_status": "可结算",
+                "rank": "B",
+                "followers": 100000,
+                "youtube_post_count": 3,
+                "monthly_new_post_views": 1000000,
+                "monthly_activity_count": 2,
+                "total_amount_jpy": 500000,
+                "creator_receivable_jpy": 502500,
+                "youdao_receivable_jpy": 577875,
+                "creator_receivable_usd": 3115.5,
+                "youdao_receivable_usd": 3582.825,
+                "cpm": 3.582825,
+            },
+            "达人",
+            "总金额（日元）",
+        ),
+        (
+            "commentary",
+            "COMMENTARY",
+            {
+                "creator_id": 3,
+                "creator_key": "commentary-1",
+                "creator_name": "Commentary One",
+                "contract_types": ["YTB长+TT"],
+                "settlement_status": "可结算",
+                "long_views": 190000,
+                "long_final_rank": "S",
+                "long_reward_jpy": 300000,
+                "short_views": 900000,
+                "short_final_rank": "S",
+                "short_reward_jpy": 350000,
+                "combined_bonus_rank": "S",
+                "combined_bonus_jpy": 60000,
+                "designated_theme_count": 1,
+                "designated_theme_reward_jpy": 15000,
+                "all_paid_views": 1090000,
+                "total_jpy_tax_incl": 725000,
+                "creator_receivable_jpy": 727500,
+                "youdao_receivable_jpy": 836625,
+                "creator_receivable_usd": 4510.5,
+                "youdao_receivable_usd": 5187.075,
+                "cpm": 4.7588,
+            },
+            "达人",
+            "解说含税总额（日元）",
+        ),
+    ],
+)
+def test_api_draft_rows_round_trip_through_legacy_snapshot_format(
+    tmp_path,
+    lane,
+    category,
+    row,
+    legacy_name_column,
+    amount_column,
+):
+    database_path = tmp_path / "koc.db"
+    repository = DashboardRepository(database_path)
+    client = _authenticated_client(database_path)
+    amount = row.get("total_amount_jpy", row.get("total_jpy_tax_incl", 0))
+    payload = {
+        "jpy_to_usd_rate": 0.0062,
+        "details": [row],
+        "summary": {
+            "total_amount_jpy": amount,
+            "creator_receivable_jpy": row["creator_receivable_jpy"],
+            "youdao_receivable_jpy": row["youdao_receivable_jpy"],
+            "creator_receivable_usd": row["creator_receivable_usd"],
+            "youdao_receivable_usd": row["youdao_receivable_usd"],
+            "settled_views": row.get(
+                "billable_views",
+                row.get("monthly_new_post_views", row.get("all_paid_views", 0)),
+            ),
+            "total_video_views": row.get(
+                "all_video_views",
+                row.get("monthly_new_post_views", row.get("all_paid_views", 0)),
+            ),
+            "overall_cpm": row["cpm"],
+        },
+        "note": "API compatibility test",
+    }
+
+    create_response = client.post(
+        f"/api/compensation/{lane}/{PERIOD}/drafts", json=payload
+    )
+    assert create_response.status_code == 201
+    version_id = create_response.json()["data"]["id"]
+
+    list_method = {
+        "grassroot": repository.list_compensation_versions,
+        "long-term": repository.list_long_term_compensation_versions,
+        "commentary": repository.list_commentary_compensation_versions,
+    }[lane]
+    snapshot = list_method(PERIOD)[0].details
+    assert legacy_name_column in snapshot.columns
+    assert snapshot.iloc[0][legacy_name_column] == row["creator_name"]
+    assert snapshot.iloc[0][amount_column] == amount
+
+    read_response = client.get(
+        f"/api/compensation/{lane}",
+        params={"period_month": PERIOD, "version_id": version_id, "page_size": 100},
+    )
+    assert read_response.status_code == 200
+    body = read_response.json()
+    assert body["meta"]["mode"] == "saved_draft"
+    assert len(body["data"]) == 1
+    assert body["data"][0]["creator_name"] == row["creator_name"]
+    returned_amount = body["data"][0].get(
+        "total_amount_jpy", body["data"][0].get("total_jpy_tax_incl")
+    )
+    assert returned_amount == amount
+
+
 def test_update_draft_success(tmp_path):
     database_path = tmp_path / "koc.db"
     DashboardRepository(database_path)
