@@ -1319,7 +1319,29 @@ def build_compensation_router(
         rows.sort(key=lambda item: (item["creator_id"], item["theme_code"]))
 
         revision = repository.get_commentary_theme_submissions_revision(period_month)
-        return {"data": rows, "meta": {"period_month": period_month, "revision": revision}}
+        eligible_creators = [
+            {
+                "id": record.id,
+                "creator_key": record.user_id,
+                "creator_name": record.koc_name,
+            }
+            for record in creator_records
+            if record.id in creator_modes and record.active
+        ]
+        theme_definitions = [
+            definition
+            for definition in definitions.values()
+            if definition.get("enabled", True)
+        ]
+        return {
+            "data": rows,
+            "meta": {
+                "period_month": period_month,
+                "revision": revision,
+                "definitions": theme_definitions,
+                "eligible_creators": eligible_creators,
+            },
+        }
 
     # ==================================================================
     # 19.3.1 exchange-rate (one global rate/month; affects all 3 tracks'

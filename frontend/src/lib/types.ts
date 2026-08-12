@@ -270,11 +270,23 @@ export interface GrassrootRow {
   creator_key: string;
   creator_name: string;
   contract_types: string[];
+  followers: number | null;
+  youtube_followers: number | null;
+  tiktok_followers: number | null;
   settlement_status: string;
   rank: string;
+  settlement_subtype: string | null;
+  contract_billable_views: number;
   billable_post_count: number;
   billable_views: number;
   all_video_views: number;
+  cpm_views_no_boost: number;
+  rewards_jpy: {
+    short_rank: number;
+    long_livestream_rank: number;
+    short_post: number;
+    long_livestream_post: number;
+  };
   total_amount_jpy: number;
   creator_receivable_jpy: number;
   youdao_receivable_jpy: number;
@@ -288,11 +300,18 @@ export interface LongTermRow {
   creator_key: string;
   creator_name: string;
   contract_types: string[];
+  contract_start_date: string | null;
+  contract_end_date: string | null;
   settlement_status: string;
   rank: string;
   followers: number | null;
+  youtube_post_count: number;
   monthly_new_post_views: number;
+  cpm_views_no_boost: number;
   monthly_activity_count: number | null;
+  activity_threshold: number | null;
+  rank_reward_jpy: number;
+  expected_cpm_jpy: number | null;
   total_amount_jpy: number;
   creator_receivable_jpy: number;
   youdao_receivable_jpy: number;
@@ -307,6 +326,23 @@ export interface CommentaryRow {
   creator_name: string;
   contract_types: string[];
   settlement_status: string;
+  youtube_uid: string | null;
+  youtube_followers: number;
+  tiktok_uid: string | null;
+  tiktok_followers: number;
+  short_platform: string | null;
+  long_views: number;
+  long_view_rank: string | null;
+  long_follower_cap_rank: string | null;
+  long_final_rank: string | null;
+  long_reward_jpy: number;
+  short_views: number;
+  short_view_rank: string | null;
+  short_follower_cap_rank: string | null;
+  short_final_rank: string | null;
+  short_reward_jpy: number;
+  combined_bonus_rank: string | null;
+  combined_bonus_jpy: number;
   designated_theme_count: number;
   designated_theme_reward_jpy: number;
   all_paid_views: number;
@@ -319,7 +355,7 @@ export interface CommentaryRow {
 }
 
 export interface ThemeSubmission {
-  id: number;
+  id: number | null;
   period_month: string;
   creator_id: number;
   theme_code: string;
@@ -338,6 +374,24 @@ export interface ThemeSubmission {
 export interface ThemeSubmissionsMeta {
   period_month: string;
   revision: string;
+  definitions?: ThemeDefinition[];
+  eligible_creators?: ThemeCreatorOption[];
+}
+
+export interface ThemeDefinition {
+  period_month: string;
+  theme_code: string;
+  theme_name: string;
+  description: string | null;
+  max_per_creator: number;
+  reward_jpy: number;
+  enabled: boolean;
+}
+
+export interface ThemeCreatorOption {
+  id: number;
+  creator_key: string;
+  creator_name: string;
 }
 
 export interface CompensationVersionDetail {

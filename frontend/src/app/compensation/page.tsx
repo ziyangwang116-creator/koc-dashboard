@@ -14,6 +14,8 @@ import type {
   CommentaryRow,
   GrassrootRow,
   LongTermRow,
+  ThemeDefinition,
+  ThemeCreatorOption,
   ThemeSubmission,
 } from "@/lib/types";
 
@@ -55,6 +57,7 @@ export default function CompensationPage() {
   const [lockConfirmed, setLockConfirmed] = useState(false);
   const [activityDrafts, setActivityDrafts] = useState<Record<string, string>>({});
   const [themeDrafts, setThemeDrafts] = useState<ThemeSubmission[] | null>(null);
+  const [themeEditorOpen, setThemeEditorOpen] = useState(false);
 
   const queryClient = useQueryClient();
 
@@ -91,7 +94,7 @@ export default function CompensationPage() {
     settlement_status: settlementStatus || undefined,
     q: q || undefined,
     version_id: versionId,
-    page_size: 50,
+    page_size: 100,
   };
 
   const grassrootQuery = useQuery({
@@ -140,6 +143,9 @@ export default function CompensationPage() {
     setThemeDrafts(themeSubmissionsQuery.data?.data ?? null);
   }
 
+  const themeDefinitions = (themeSubmissionsQuery.data?.meta.definitions ?? []) as ThemeDefinition[];
+  const eligibleThemeCreators = (themeSubmissionsQuery.data?.meta.eligible_creators ?? []) as ThemeCreatorOption[];
+
   const writeUiContextKey = `${lane}:${effectiveMonth}:${versionId ?? ""}`;
   const [lastWriteUiContextKey, setLastWriteUiContextKey] = useState(writeUiContextKey);
   if (writeUiContextKey !== lastWriteUiContextKey) {
@@ -172,7 +178,13 @@ export default function CompensationPage() {
     mutationFn: () => {
       const counts: Record<string, number> = {};
       for (const [key, value] of Object.entries(activityDrafts)) {
-        if (value.trim() !== "") counts[key] = Number(value);
+        if (value.trim() !== "") {
+          const parsed = Number(value);
+          if (!Number.isInteger(parsed) || parsed < 0) {
+            throw new Error("活动数必须是非负整数。");
+          }
+          counts[key] = parsed;
+        }
       }
       return compensationApi.saveLongTermActivityCounts(effectiveMonth, counts);
     },
@@ -212,6 +224,40 @@ export default function CompensationPage() {
       }
     },
   });
+
+  function addThemeSubmission() {
+    const creator = eligibleThemeCreators[0];
+    const definition = themeDefinitions[0];
+    if (!creator || !definition) return;
+    setThemeDrafts((prev) => [
+      ...(prev ?? []),
+      {
+        id: null,
+        period_month: effectiveMonth,
+        creator_id: creator.id,
+        theme_code: definition.theme_code,
+        theme_name: definition.theme_name,
+        content_format: "LONG",
+        urls: [""],
+        submitted_date: effectiveMonth ? `${effectiveMonth}-01` : "",
+        review_status: "PENDING",
+        note: null,
+        theme_reward_eligible: false,
+        matched_post_urls: [],
+        billing_excluded_url_count: 0,
+        billing_excluded: false,
+      },
+    ]);
+    setThemeEditorOpen(true);
+  }
+
+  function updateThemeRow(index: number, patch: Partial<ThemeSubmission>) {
+    setThemeDrafts((prev) => (prev ?? []).map((row, rowIndex) => rowIndex === index ? { ...row, ...patch } : row));
+  }
+
+  function removeThemeSubmission(index: number) {
+    setThemeDrafts((prev) => (prev ?? []).filter((_row, rowIndex) => rowIndex !== index));
+  }
 
   const createDraftMutation = useMutation({
     mutationFn: () => {
@@ -267,25 +313,17 @@ export default function CompensationPage() {
   const grassrootColumns: Column<GrassrootRow>[] = useMemo(
     () => [
       { key: "creator_name", header: "达人", width: 110, render: (r) => r.creator_name },
+      { key: "creator_key", header: "UID", width: 110, render: (r) => r.creator_key },
+      { key: "contract_types", header: "合同类型", width: 120, render: (r) => r.contract_types.join("、") || "—" },
+      { key: "followers", header: "粉丝数", width: 90, align: "right", render: (r) => fmtInt(r.followers) },
       { key: "settlement_status", header: "结算状态", width: 100, render: (r) => r.settlement_status },
       { key: "rank", header: "等级", width: 60, render: (r) => r.rank },
-      {
-        key: "creator_receivable_usd",
-        header: "博主应收美元",
-        width: 120,
-        align: "right",
-        render: (r) => <strong>{fmtUsd(r.creator_receivable_usd)}</strong>,
-      },
-      {
-        key: "total_amount_jpy",
-        header: "总金额（日元）",
-        width: 110,
-        align: "right",
-        render: (r) => (
-          <span style={{ color: "var(--color-text-muted)", fontSize: 12 }}>{fmtInt(r.total_amount_jpy)}</span>
-        ),
-      },
+      { key: "settlement_subtype", header: "计费类型", width: 110, render: (r) => r.settlement_subtype ?? "—" },
+      { key: "contract_billable_views", header: "合同内播放量", width: 120, align: "right", render: (r) => fmtInt(r.contract_billable_views) },
       { key: "billable_views", header: "计费播放量", width: 110, align: "right", render: (r) => fmtInt(r.billable_views) },
+      { key: "all_video_views", header: "全部播放量", width: 110, align: "right", render: (r) => fmtInt(r.all_video_views) },
+      { key: "billable_post_count", header: "投稿数", width: 70, align: "right", render: (r) => fmtInt(r.billable_post_count) },
+      { key: "creator_receivable_usd", header: "博主应收美元", width: 120, align: "right", render: (r) => <strong>{fmtUsd(r.creator_receivable_usd)}</strong> },
       { key: "cpm", header: "CPM", width: 70, align: "right", render: (r) => fmtCpm(r.cpm) },
     ],
     []
@@ -294,6 +332,10 @@ export default function CompensationPage() {
   const longTermColumns: Column<LongTermRow>[] = useMemo(
     () => [
       { key: "creator_name", header: "达人", width: 110, render: (r) => r.creator_name },
+      { key: "creator_key", header: "UID", width: 110, render: (r) => r.creator_key },
+      { key: "contract_types", header: "合同类型", width: 120, render: (r) => r.contract_types.join("、") || "—" },
+      { key: "contract_start_date", header: "合同开始", width: 105, render: (r) => r.contract_start_date ?? "—" },
+      { key: "contract_end_date", header: "合同截止", width: 105, render: (r) => r.contract_end_date ?? "—" },
       { key: "settlement_status", header: "结算状态", width: 110, render: (r) => r.settlement_status },
       { key: "rank", header: "等级", width: 60, render: (r) => r.rank },
       {
@@ -310,6 +352,9 @@ export default function CompensationPage() {
         align: "right",
         render: (r) => fmtInt(r.monthly_new_post_views),
       },
+      { key: "youtube_post_count", header: "YouTube投稿数", width: 115, align: "right", render: (r) => fmtInt(r.youtube_post_count) },
+      { key: "activity_threshold", header: "活动门槛", width: 80, align: "right", render: (r) => fmtInt(r.activity_threshold) },
+      { key: "rank_reward_jpy", header: "等级金额", width: 100, align: "right", render: (r) => fmtInt(r.rank_reward_jpy) },
       {
         key: "creator_receivable_usd",
         header: "博主应收美元",
@@ -325,7 +370,14 @@ export default function CompensationPage() {
   const commentaryColumns: Column<CommentaryRow>[] = useMemo(
     () => [
       { key: "creator_name", header: "达人", width: 110, render: (r) => r.creator_name },
+      { key: "creator_key", header: "UID", width: 110, render: (r) => r.creator_key },
+      { key: "contract_types", header: "合同类型", width: 140, render: (r) => r.contract_types.join("、") || "—" },
       { key: "settlement_status", header: "结算状态", width: 100, render: (r) => r.settlement_status },
+      { key: "long_views", header: "长视频播放量", width: 115, align: "right", render: (r) => fmtInt(r.long_views) },
+      { key: "long_final_rank", header: "长视频等级", width: 90, render: (r) => r.long_final_rank ?? "—" },
+      { key: "short_views", header: "短视频播放量", width: 115, align: "right", render: (r) => fmtInt(r.short_views) },
+      { key: "short_final_rank", header: "短视频等级", width: 90, render: (r) => r.short_final_rank ?? "—" },
+      { key: "combined_bonus_jpy", header: "并用奖金", width: 95, align: "right", render: (r) => fmtInt(r.combined_bonus_jpy) },
       {
         key: "designated_theme_count",
         header: "指定主题件数",
@@ -592,10 +644,6 @@ export default function CompensationPage() {
               </div>
               <div style={summaryValue}>{fmtUsd(summary.creator_receivable_usd as number)}</div>
             </div>
-            <div className="metric-card" style={{ ...summaryCard, opacity: 0.7 }}>
-              <div style={summaryLabel}>总金额（日元，审计口径）</div>
-              <div style={{ ...summaryValue, fontSize: 15 }}>{fmtInt(summary.total_amount_jpy as number)}</div>
-            </div>
             <div className="metric-card" style={summaryCard}>
               <div style={summaryLabel}>整体 CPM</div>
               <div style={summaryValue}>{fmtCpm(summary.overall_cpm as number)}</div>
@@ -655,10 +703,10 @@ export default function CompensationPage() {
                   <input
                     aria-label={`活动数-${row.creator_name}`}
                     style={{ ...selectStyle, width: 80 }}
-                    value={activityDrafts[row.creator_key] ?? (row.monthly_activity_count != null ? String(row.monthly_activity_count) : "")}
-                    onChange={(e) =>
-                      setActivityDrafts((prev) => ({ ...prev, [row.creator_key]: e.target.value }))
-                    }
+                  value={activityDrafts[String(row.record_id)] ?? (row.monthly_activity_count != null ? String(row.monthly_activity_count) : "")}
+                  onChange={(e) =>
+                      setActivityDrafts((prev) => ({ ...prev, [String(row.record_id)]: e.target.value }))
+                  }
                   />
                 </label>
               ))}
@@ -676,66 +724,64 @@ export default function CompensationPage() {
 
         {lane === "COMMENTARY" && (
           <div style={panelStyle}>
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>指定主题申报</div>
-            <StateShell
-              isLoading={themeSubmissionsQuery.isLoading}
-              isError={themeSubmissionsQuery.isError}
-              isEmpty={(themeDrafts ?? []).length === 0}
-            >
-              <table style={{ width: "100%", fontSize: 12.5 }}>
-                <thead>
-                  <tr>
-                    <th style={thCell}>达人ID</th>
-                    <th style={thCell}>主题</th>
-                    <th style={thCell}>格式</th>
-                    <th style={thCell}>审核状态</th>
-                    <th style={thCell}>计费排除</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(themeDrafts ?? []).map((row, idx) => (
-                    <tr key={row.id}>
-                      <td style={tdCell}>{row.creator_id}</td>
-                      <td style={tdCell}>{row.theme_name}</td>
-                      <td style={tdCell}>{row.content_format}</td>
-                      <td style={tdCell}>
-                        <select
-                          aria-label={`审核状态-${row.id}`}
-                          value={row.review_status}
-                          onChange={(e) =>
-                            setThemeDrafts((prev) =>
-                              (prev ?? []).map((item, i) =>
-                                i === idx ? { ...item, review_status: e.target.value as ThemeSubmission["review_status"] } : item
-                              )
-                            )
-                          }
-                          style={selectStyle}
-                        >
-                          <option value="PENDING">PENDING</option>
-                          <option value="APPROVED">APPROVED</option>
-                          <option value="REJECTED">REJECTED</option>
-                        </select>
-                      </td>
-                      <td style={tdCell}>
-                        {row.billing_excluded ? (
-                          <span style={{ color: "var(--color-warning)" }}>是（{row.billing_excluded_url_count} 条）</span>
-                        ) : (
-                          "否"
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>指定主题申报</div>
+              <button type="button" style={primaryBtn} disabled={!themeDefinitions.length || !eligibleThemeCreators.length} onClick={addThemeSubmission}>
+                新增申报
+              </button>
+            </div>
+            <div style={{ fontSize: 12, color: "var(--color-text-muted)", marginBottom: 8 }}>
+              仅显示解说达人；长视频填写 1 条链接，短视频填写 3 条链接。已通过的链接会从计费播放量中排除。
+            </div>
+            <StateShell isLoading={themeSubmissionsQuery.isLoading} isError={themeSubmissionsQuery.isError} isEmpty={(themeDrafts ?? []).length === 0}>
+              {themeEditorOpen || (themeDrafts ?? []).length > 0 ? (
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", fontSize: 12.5, minWidth: 1040 }}>
+                    <thead><tr>
+                      <th style={thCell}>解说达人</th><th style={thCell}>指定主题</th><th style={thCell}>内容形式</th>
+                      <th style={thCell}>视频链接</th><th style={thCell}>提交日期</th><th style={thCell}>审核状态</th>
+                      <th style={thCell}>匹配/排除</th><th style={thCell}>操作</th>
+                    </tr></thead>
+                    <tbody>
+                      {(themeDrafts ?? []).map((row, idx) => {
+                        const definition = themeDefinitions.find((item) => item.theme_code === row.theme_code);
+                        const expectedCount = row.content_format === "LONG" ? 1 : 3;
+                        return <tr key={row.id ?? `new-${idx}`}>
+                          <td style={tdCell}>
+                            <select aria-label={`解说达人-${idx}`} value={String(row.creator_id)} style={selectStyle} onChange={(e) => updateThemeRow(idx, { creator_id: Number(e.target.value) })}>
+                              {eligibleThemeCreators.map((creator) => <option key={creator.id} value={creator.id}>{creator.creator_name} · {creator.creator_key}</option>)}
+                            </select>
+                          </td>
+                          <td style={tdCell}>
+                            <select aria-label={`指定主题-${idx}`} value={row.theme_code} style={selectStyle} onChange={(e) => { const next = themeDefinitions.find((item) => item.theme_code === e.target.value); updateThemeRow(idx, { theme_code: e.target.value, theme_name: next?.theme_name ?? row.theme_name }); }}>
+                              {themeDefinitions.map((item) => <option key={item.theme_code} value={item.theme_code}>{item.theme_name} · {item.theme_code}</option>)}
+                            </select>
+                          </td>
+                          <td style={tdCell}>
+                            <select aria-label={`内容形式-${idx}`} value={row.content_format} style={selectStyle} onChange={(e) => updateThemeRow(idx, { content_format: e.target.value as ThemeSubmission["content_format"], urls: e.target.value === "LONG" ? [row.urls[0] ?? ""] : [...row.urls, "", ""].slice(0, 3) })}>
+                              <option value="LONG">长视频（1条）</option><option value="SHORT">短视频（3条）</option>
+                            </select>
+                          </td>
+                          <td style={tdCell}>
+                            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                              {Array.from({ length: expectedCount }).map((_value, urlIndex) => <input key={urlIndex} aria-label={`视频链接-${idx}-${urlIndex}`} style={{ ...selectStyle, width: 260 }} value={row.urls[urlIndex] ?? ""} onChange={(e) => { const urls = [...row.urls]; urls[urlIndex] = e.target.value; updateThemeRow(idx, { urls }); }} placeholder={`视频链接 ${urlIndex + 1}`} />)}
+                            </div>
+                          </td>
+                          <td style={tdCell}><input type="date" aria-label={`提交日期-${idx}`} style={selectStyle} value={row.submitted_date ?? ""} onChange={(e) => updateThemeRow(idx, { submitted_date: e.target.value })} /></td>
+                          <td style={tdCell}><select aria-label={`审核状态-${idx}`} value={row.review_status} style={selectStyle} onChange={(e) => updateThemeRow(idx, { review_status: e.target.value as ThemeSubmission["review_status"] })}><option value="PENDING">待审核</option><option value="APPROVED">已通过</option><option value="REJECTED">不通过</option></select></td>
+                          <td style={tdCell}>{row.billing_excluded ? `已匹配 ${row.billing_excluded_url_count} 条` : (definition ? `${definition.reward_jpy.toLocaleString()} 日元` : "—")}</td>
+                          <td style={tdCell}><button type="button" style={linkBtn} onClick={() => removeThemeSubmission(idx)}>删除</button></td>
+                        </tr>;
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
             </StateShell>
-            <button
-              type="button"
-              style={{ ...primaryBtn, marginTop: 8 }}
-              disabled={themeSubmissionsMutation.isPending || !themeDrafts}
-              onClick={() => themeSubmissionsMutation.mutate()}
-            >
-              保存申报审核状态
-            </button>
+            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              <button type="button" style={primaryBtn} disabled={themeSubmissionsMutation.isPending || !themeDrafts} onClick={() => themeSubmissionsMutation.mutate()}>保存指定主题申报</button>
+              {!themeEditorOpen && <button type="button" style={linkBtn} onClick={() => setThemeEditorOpen(true)}>编辑申报</button>}
+            </div>
           </div>
         )}
       </section>
