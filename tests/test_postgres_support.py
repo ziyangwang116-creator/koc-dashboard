@@ -11,6 +11,7 @@ from database.db import (
     normalize_database_target,
 )
 from database.postgres_schema import (
+    POSTGRES_COMMENTARY_THEME_COMPAT_MIGRATION_ID,
     POSTGRES_SCHEMA_MIGRATION_ID,
     POSTGRES_SCHEMA_STATEMENTS,
     apply_postgres_migrations,
@@ -232,6 +233,23 @@ def test_postgres_schema_covers_all_current_business_tables():
         assert f"CREATE TABLE IF NOT EXISTS {table_name}" in schema
     assert "AUTOINCREMENT" not in schema
     assert "PRAGMA" not in schema
+
+
+def test_postgres_compatibility_migration_repairs_commentary_theme_objects():
+    connection = _FakeConnection()
+
+    apply_postgres_migrations(connection, ())
+
+    executed_sql = "\n".join(sql for sql, _ in connection.executed)
+    assert "CREATE TABLE IF NOT EXISTS commentary_theme_definition" in executed_sql
+    assert "CREATE TABLE IF NOT EXISTS commentary_theme_submission" in executed_sql
+    assert "CREATE TABLE IF NOT EXISTS commentary_theme_submission_revision" in executed_sql
+    assert "idx_commentary_theme_submission_period" in executed_sql
+    assert POSTGRES_COMMENTARY_THEME_COMPAT_MIGRATION_ID in next(
+        parameters
+        for sql, parameters in connection.executed
+        if "INSERT INTO schema_migrations" in sql and POSTGRES_COMMENTARY_THEME_COMPAT_MIGRATION_ID in parameters
+    )
 
 
 def test_postgres_migration_is_transaction_friendly_and_seeds_defaults():

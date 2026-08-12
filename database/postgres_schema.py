@@ -5,6 +5,7 @@ from typing import Any
 
 
 POSTGRES_SCHEMA_MIGRATION_ID = "postgres_v2_ai_agent"
+POSTGRES_COMMENTARY_THEME_COMPAT_MIGRATION_ID = "postgres_v3_commentary_theme_objects"
 
 
 POSTGRES_SCHEMA_STATEMENTS = (
@@ -399,6 +400,57 @@ POSTGRES_INDEX_STATEMENTS = (
 )
 
 
+# Forward-compatible repair for databases that were marked as v2 before the
+# commentary theme tables were added. CREATE IF NOT EXISTS keeps this safe for
+# both fresh databases and existing production databases.
+POSTGRES_COMMENTARY_THEME_COMPAT_STATEMENTS = (
+    """
+    CREATE TABLE IF NOT EXISTS commentary_theme_definition (
+        period_month TEXT NOT NULL,
+        theme_code TEXT NOT NULL,
+        theme_name TEXT NOT NULL,
+        description TEXT,
+        max_per_creator INTEGER NOT NULL DEFAULT 1 CHECK (max_per_creator > 0),
+        reward_jpy BIGINT NOT NULL DEFAULT 15000 CHECK (reward_jpy >= 0),
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+        created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+        updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+        PRIMARY KEY (period_month, theme_code)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS commentary_theme_submission (
+        id BIGSERIAL PRIMARY KEY,
+        period_month TEXT NOT NULL,
+        creator_id BIGINT NOT NULL REFERENCES koc_master(id) ON DELETE CASCADE,
+        theme_code TEXT NOT NULL,
+        content_format TEXT NOT NULL CHECK (content_format IN ('LONG', 'SHORT')),
+        urls_json TEXT NOT NULL,
+        submitted_date TEXT,
+        review_status TEXT NOT NULL DEFAULT 'PENDING' CHECK (
+            review_status IN ('PENDING', 'APPROVED', 'REJECTED')
+        ),
+        note TEXT,
+        created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+        updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+        UNIQUE (period_month, creator_id, theme_code)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS commentary_theme_submission_revision (
+        period_month TEXT PRIMARY KEY,
+        revision TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)
+    )
+    """,
+)
+
+POSTGRES_COMMENTARY_THEME_COMPAT_INDEX_STATEMENTS = (
+    "CREATE INDEX IF NOT EXISTS idx_commentary_theme_submission_period "
+    "ON commentary_theme_submission(period_month, creator_id)",
+)
+
+
 JULY_COMMENTARY_THEMES = (
     (
         "2026-07",
@@ -480,5 +532,31 @@ def apply_postgres_migrations(
         connection.execute(
             "INSERT INTO schema_migrations (migration_id) VALUES (?)",
             (POSTGRES_SCHEMA_MIGRATION_ID,),
+        )
+
+    # Repair partially initialized v2 databases. This is deliberately a
+    # separate forward migration because the original schema marker may exist
+    # even when a later table addition was skipped during deployment.
+    compat_applied = connection.execute(
+        "SELECT 1 FROM schema_migrations WHERE migration_id = ?",
+        (POSTGRES_COMMENTARY_THEME_COMPAT_MIGRATION_ID,),
+    ).fetchone()
+    if compat_applied is None:
+        for statement in POSTGRES_COMMENTARY_THEME_COMPAT_STATEMENTS:
+            connection.execute(statement)
+        for statement in POSTGRES_COMMENTARY_THEME_COMPAT_INDEX_STATEMENTS:
+            connection.execute(statement)
+        connection.executemany(
+            """
+            INSERT INTO commentary_theme_definition (
+                period_month, theme_code, theme_name, description
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(period_month, theme_code) DO NOTHING
+            """,
+            JULY_COMMENTARY_THEMES,
+        )
+        connection.execute(
+            "INSERT INTO schema_migrations (migration_id) VALUES (?)",
+            (POSTGRES_COMMENTARY_THEME_COMPAT_MIGRATION_ID,),
         )
     _seed_default_creators(connection, seed_records)
