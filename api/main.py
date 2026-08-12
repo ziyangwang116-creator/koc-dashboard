@@ -9,7 +9,13 @@ from pydantic import BaseModel
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from config.settings import Settings, load_settings
-from database.db import CONNECTION_LOST_ERRORS, is_postgres_target, sanitize_db_error_marker
+from database.db import (
+    CONNECTION_LOST_ERRORS,
+    _prefer_ipv4_for_supabase_pooler,
+    connect,
+    is_postgres_target,
+    sanitize_db_error_marker,
+)
 from ui.auth import password_matches
 
 from api.compensation import build_compensation_router
@@ -212,10 +218,27 @@ def create_app(
     )
     app.include_router(followers_router)
 
-    @app.get("/api/health")
-    def health() -> dict:
+    @app.get("/api/health", response_model=None)
+    def health():
         database = "postgres" if is_postgres_target(resolved_settings.database_path) else "sqlite"
-        return {"data": {"status": "ok", "database": database}}
+        database_target = str(resolved_settings.database_path)
+        try:
+            with connect(resolved_settings.database_path) as connection:
+                connection.execute("SELECT 1").fetchone()
+        except Exception as exc:  # noqa: BLE001 - never expose driver details
+            logger.error("database readiness check failed: %s", sanitize_db_error_marker(exc))
+            return JSONResponse(status_code=503, content=GENERIC_ERROR_RESPONSE)
+
+        return {
+            "data": {
+                "status": "ok",
+                "database": database,
+                "database_ready": True,
+                "supabase_ipv4_preferred": (
+                    _prefer_ipv4_for_supabase_pooler(database_target) != database_target
+                ),
+            }
+        }
 
     @app.post("/api/auth/login")
     def login(payload: LoginRequest) -> JSONResponse:
