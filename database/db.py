@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import socket
 import sqlite3
 import threading
 from collections.abc import Iterable, Iterator, Sequence
@@ -9,6 +10,7 @@ from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pandas as pd
 
@@ -110,6 +112,43 @@ def _normalize_postgres_url(database_url: str) -> str:
     if database_url.casefold().startswith("postgresql+psycopg://"):
         return "postgresql://" + database_url.split("://", 1)[1]
     return database_url
+
+
+def _prefer_ipv4_for_supabase_pooler(database_url: str) -> str:
+    """Use a resolved IPv4 address for Supabase's Session Pooler when available.
+
+    Some hosting environments provide no IPv6 egress while DNS returns an AAAA
+    record before IPv4. libpq then attempts that unreachable address and the
+    application appears to exhaust its connection pool. Keeping the hostname
+    in the URI preserves TLS hostname validation; ``hostaddr`` only selects
+    the transport address.
+    """
+    parts = urlsplit(database_url)
+    hostname = parts.hostname
+    if not hostname or not hostname.casefold().endswith(".pooler.supabase.com"):
+        return database_url
+
+    try:
+        addresses = socket.getaddrinfo(
+            hostname,
+            parts.port or 5432,
+            family=socket.AF_INET,
+            type=socket.SOCK_STREAM,
+        )
+    except OSError:
+        return database_url
+
+    ipv4_address = next((item[4][0] for item in addresses if item[4]), None)
+    if not ipv4_address:
+        return database_url
+
+    query_items = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if key.casefold() != "hostaddr"
+    ]
+    query_items.append(("hostaddr", ipv4_address))
+    return urlunsplit(parts._replace(query=urlencode(query_items)))
 
 
 def _translate_postgres_sql(sql: str, *, return_insert_id: bool) -> str:
@@ -224,7 +263,9 @@ def _postgres_pool(database_url: str) -> Any:
         raise RuntimeError(
             "PostgreSQL support requires psycopg. Run: pip install 'psycopg[binary,pool]'"
         )
-    normalized = _normalize_postgres_url(database_url)
+    normalized = _prefer_ipv4_for_supabase_pooler(
+        _normalize_postgres_url(database_url)
+    )
     with _POSTGRES_POOLS_LOCK:
         pool = _POSTGRES_POOLS.get(normalized)
         if pool is None:

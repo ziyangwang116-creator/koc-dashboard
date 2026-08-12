@@ -1,8 +1,11 @@
 from pathlib import Path
 
+import socket
+
 from database.db import (
     DatabaseRow,
     PostgresManagedConnection,
+    _prefer_ipv4_for_supabase_pooler,
     _translate_postgres_sql,
     is_postgres_target,
     normalize_database_target,
@@ -104,6 +107,55 @@ def test_postgres_target_detection_preserves_urls_and_local_paths():
     assert is_postgres_target("data/koc.db") is False
     assert normalize_database_target(url) == url
     assert normalize_database_target("data/koc.db") == Path("data/koc.db")
+
+
+def test_supabase_pooler_prefers_ipv4_without_replacing_tls_hostname(monkeypatch):
+    calls = []
+
+    def fake_getaddrinfo(host, port, *, family, type):
+        calls.append((host, port, family, type))
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("203.0.113.9", port)),
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    resolved = _prefer_ipv4_for_supabase_pooler(
+        "postgresql://user:secret@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require"
+    )
+
+    assert "aws-0-ap-southeast-1.pooler.supabase.com" in resolved
+    assert "sslmode=require" in resolved
+    assert "hostaddr=203.0.113.9" in resolved
+    assert calls == [
+        (
+            "aws-0-ap-southeast-1.pooler.supabase.com",
+            5432,
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+        )
+    ]
+
+
+def test_supabase_pooler_keeps_original_url_when_ipv4_resolution_fails(monkeypatch):
+    url = "postgresql://user:secret@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres"
+
+    def failing_getaddrinfo(*args, **kwargs):
+        raise OSError("DNS unavailable")
+
+    monkeypatch.setattr(socket, "getaddrinfo", failing_getaddrinfo)
+
+    assert _prefer_ipv4_for_supabase_pooler(url) == url
+
+
+def test_non_supabase_database_urls_skip_ipv4_resolution(monkeypatch):
+    def unexpected_getaddrinfo(*args, **kwargs):
+        raise AssertionError("non-Supabase URLs must not resolve here")
+
+    monkeypatch.setattr(socket, "getaddrinfo", unexpected_getaddrinfo)
+
+    assert _prefer_ipv4_for_supabase_pooler(
+        "postgresql://user:secret@db.example.test/postgres"
+    ) == "postgresql://user:secret@db.example.test/postgres"
 
 
 def test_database_row_matches_sqlite_row_access_patterns():
