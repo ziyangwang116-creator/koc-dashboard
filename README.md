@@ -209,7 +209,7 @@ DATABASE_URL=postgresql://USER:PASSWORD@HOST:PORT/postgres?sslmode=require
 TEAM_PASSWORD=replace-with-a-strong-shared-password
 AI_PROVIDER=deepseek
 DEEPSEEK_API_KEY=replace-with-your-deepseek-api-key
-DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_MODEL=deepseek-chat
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 OPENAI_API_KEY=replace-with-your-openai-api-key
 OPENAI_MODEL=gpt-5.6-sol
@@ -237,7 +237,7 @@ Responses API 调用受控工具，
 的结算版本。它不能执行任意 SQL，也不能修改达人库、投稿、合同或结算数据。
 
 DeepSeek 使用 `https://api.deepseek.com`，默认模型为
-`deepseek-v4-flash`。当前 DeepSeek Responses API 是无状态接口，因此应用会显式
+`deepseek-chat`。DeepSeek 使用兼容 Chat Completions 的工具调用接口，因此应用会显式
 回传必要的对话与工具调用结果。将 `AI_PROVIDER` 改为 `openai` 后，可继续使用
 `OPENAI_API_KEY` 和 `OPENAI_MODEL` 作为备用通道。
 

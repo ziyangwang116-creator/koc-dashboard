@@ -30,6 +30,12 @@ class AIRepository:
         now = _utc_now()
         expires_at = now + timedelta(days=max(1, retention_days))
         with connect(self.database_path) as connection:
+            existing = connection.execute(
+                "SELECT session_id FROM ai_conversation WHERE id = ?",
+                (conversation_id,),
+            ).fetchone()
+            if existing is not None and str(existing["session_id"]) != session_id:
+                raise PermissionError("Conversation does not belong to this session.")
             connection.execute(
                 """
                 INSERT INTO ai_conversation (
@@ -49,6 +55,33 @@ class AIRepository:
                     expires_at.isoformat(),
                 ),
             )
+
+    def conversation_belongs_to_session(
+        self,
+        conversation_id: str,
+        session_id: str,
+    ) -> bool:
+        with connect(self.database_path) as connection:
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM ai_conversation
+                WHERE id = ? AND session_id = ? AND expires_at >= ?
+                """,
+                (conversation_id, session_id, _utc_now().isoformat()),
+            ).fetchone()
+        return row is not None
+
+    def list_messages_for_session(
+        self,
+        conversation_id: str,
+        session_id: str,
+        *,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        if not self.conversation_belongs_to_session(conversation_id, session_id):
+            raise PermissionError("Conversation does not belong to this session.")
+        return self.list_messages(conversation_id, limit=limit)
 
     def add_message(
         self,

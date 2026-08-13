@@ -22,7 +22,7 @@ class Settings:
     team_password: str | None = field(default=None, repr=False)
     ai_provider: str = "deepseek"
     deepseek_api_key: str | None = field(default=None, repr=False)
-    deepseek_model: str = "deepseek-v4-flash"
+    deepseek_model: str = "deepseek-chat"
     deepseek_base_url: str = "https://api.deepseek.com"
     openai_api_key: str | None = field(default=None, repr=False)
     openai_model: str = "gpt-5.6-sol"
@@ -140,7 +140,7 @@ def load_settings(path: Path = SETTINGS_FILE, env_path: Path = ENV_FILE) -> Sett
         raise ValueError("AI_PROVIDER 必须是 deepseek 或 openai。")
     deepseek_api_key = _env_value("DEEPSEEK_API_KEY", env_values) or None
     deepseek_model = _env_value(
-        "DEEPSEEK_MODEL", env_values, "deepseek-v4-flash"
+        "DEEPSEEK_MODEL", env_values, "deepseek-chat"
     )
     deepseek_base_url = _env_value(
         "DEEPSEEK_BASE_URL", env_values, "https://api.deepseek.com"

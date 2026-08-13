@@ -18,6 +18,7 @@ from database.db import (
 )
 from ui.auth import password_matches
 
+from api.agent import build_agent_router
 from api.compensation import build_compensation_router
 from api.creators import build_creators_router
 from api.dashboard import build_dashboard_router
@@ -142,6 +143,7 @@ def create_app(
     *,
     environment: str | None = None,
     followers_service_factory=None,
+    agent_service_factory=None,
 ) -> FastAPI:
     """Build the FastAPI app. Phase 1: read-only endpoints + session auth only.
 
@@ -217,6 +219,19 @@ def create_app(
         tiktok_persistent_headless=resolved_settings.tiktok_persistent_headless,
     )
     app.include_router(followers_router)
+
+    agent_router = build_agent_router(
+        database_path=resolved_settings.database_path,
+        require_session=Depends(require_session),
+        session_context=Depends(get_session_context),
+        provider=resolved_settings.ai_provider,
+        model=resolved_settings.ai_model,
+        configured=resolved_settings.ai_configured,
+        api_key=resolved_settings.ai_api_key,
+        base_url=resolved_settings.ai_base_url,
+        service_factory=agent_service_factory,
+    )
+    app.include_router(agent_router)
 
     @app.get("/api/health", response_model=None)
     def health():

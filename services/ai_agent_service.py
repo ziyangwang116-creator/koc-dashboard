@@ -196,6 +196,94 @@ class AIAgentService:
                 "duration_ms": duration_ms,
             }
 
+    def _chat_completion_tools(self) -> list[dict[str, Any]]:
+        tools: list[dict[str, Any]] = []
+        for tool in OPENAI_TOOLS:
+            function = {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["parameters"],
+            }
+            tools.append({"type": "function", "function": function})
+        return tools
+
+    def _ask_with_chat_completions(
+        self,
+        *,
+        conversation_id: str,
+        history: list[dict[str, Any]],
+    ) -> AIAgentResponse:
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            *(
+                {"role": item["role"], "content": item["content"]}
+                for item in history
+            ),
+        ]
+        tool_audits: list[dict[str, Any]] = []
+        tools = self._chat_completion_tools()
+
+        for _ in range(self.MAX_TOOL_ROUNDS + 1):
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+            )
+            choices = _item_value(response, "choices", []) or []
+            if not choices:
+                raise AIAgentServiceError("AI 未返回可显示的回答。")
+            message = _item_value(choices[0], "message")
+            tool_calls = _item_value(message, "tool_calls", []) or []
+            if not tool_calls:
+                answer = str(_item_value(message, "content", "") or "").strip()
+                if not answer:
+                    raise AIAgentServiceError("AI 未返回可显示的回答。")
+                return AIAgentResponse(answer=answer, tool_calls=tuple(tool_audits))
+
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": _item_value(message, "content", None),
+                    "tool_calls": [
+                        {
+                            "id": str(_item_value(call, "id", "")),
+                            "type": "function",
+                            "function": {
+                                "name": str(
+                                    _item_value(_item_value(call, "function"), "name", "")
+                                ),
+                                "arguments": str(
+                                    _item_value(
+                                        _item_value(call, "function"),
+                                        "arguments",
+                                        "{}",
+                                    )
+                                ),
+                            },
+                        }
+                        for call in tool_calls
+                    ],
+                }
+            )
+            for call in tool_calls:
+                function = _item_value(call, "function")
+                result, audit = self._execute_tool(
+                    conversation_id=conversation_id,
+                    tool_name=str(_item_value(function, "name", "")),
+                    raw_arguments=str(_item_value(function, "arguments", "{}")),
+                )
+                tool_audits.append(audit)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": str(_item_value(call, "id", "")),
+                        "content": json.dumps(result, ensure_ascii=False, default=str),
+                    }
+                )
+
+        raise AIAgentServiceError("AI 工具调用轮次过多，已停止本次请求。")
+
     def ask(
         self,
         *,
@@ -214,6 +302,27 @@ class AIAgentService:
         )
         self.repository.add_message(conversation_id, "user", cleaned_message)
         history = self.repository.list_messages(conversation_id, limit=30)
+        if self.provider == "deepseek" and hasattr(self.client, "chat"):
+            try:
+                response = self._ask_with_chat_completions(
+                    conversation_id=conversation_id,
+                    history=history,
+                )
+            except AIAgentServiceError:
+                raise
+            except Exception as exc:
+                raise AIAgentServiceError(self._provider_error_message(exc)) from exc
+            self.repository.add_message(
+                conversation_id,
+                "assistant",
+                response.answer,
+                metadata={
+                    "provider": self.provider,
+                    "model": self.model,
+                    "tool_calls": len(response.tool_calls),
+                },
+            )
+            return response
         inputs = [
             {"role": item["role"], "content": item["content"]}
             for item in history
@@ -283,7 +392,7 @@ class AIAgentService:
                     "若持续出现，请检查账户余额以及并发、RPM/QPM 限制。"
                 )
             else:
-                message = f"{provider_label} AI 请求失败：{exc}"
+                message = f"{provider_label} AI 请求失败，请稍后重试。"
             raise AIAgentServiceError(message) from exc
 
         answer = str(_item_value(response, "output_text", "")).strip()
@@ -300,3 +409,17 @@ class AIAgentService:
             },
         )
         return AIAgentResponse(answer=answer, tool_calls=tuple(tool_audits))
+
+    def _provider_error_message(self, exc: Exception) -> str:
+        status_code = _exception_status_code(exc)
+        provider_label = "DeepSeek" if self.provider == "deepseek" else "OpenAI"
+        if status_code == 401:
+            return f"{provider_label} API Key 无效，请更新云端 Secrets 后重启。"
+        if status_code == 402:
+            return f"{provider_label} API 账户余额不足。"
+        if status_code == 429:
+            return (
+                f"{provider_label} API 当前限流（429）。请等待 30-60 秒后重试；"
+                "若持续出现，请检查账户余额以及并发、RPM/QPM 限制。"
+            )
+        return f"{provider_label} AI 请求失败，请稍后重试。"

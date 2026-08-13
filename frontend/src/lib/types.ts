@@ -534,3 +534,33 @@ export interface FollowerManualUpdateResult {
     }
   >;
 }
+
+// --- Agent ---
+
+export interface AgentStatus {
+  configured: boolean;
+  provider: "deepseek" | "openai";
+  provider_label: string;
+  model: string;
+  read_only: true;
+}
+
+export interface AgentMessage {
+  role: "user" | "assistant";
+  content: string;
+  metadata?: Record<string, unknown>;
+  created_at?: string;
+  tool_calls?: AgentToolEvidence[];
+}
+
+export interface AgentToolEvidence {
+  tool_name: string;
+  summary: Record<string, unknown>;
+  duration_ms: number;
+}
+
+export interface AgentReply {
+  conversation_id: string;
+  answer: string;
+  tool_calls: AgentToolEvidence[];
+}

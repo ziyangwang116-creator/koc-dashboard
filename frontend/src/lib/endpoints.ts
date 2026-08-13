@@ -28,6 +28,9 @@ import type {
   FollowerBatchJobStatus,
   FollowerBatchJobResultRow,
   FollowerManualUpdateResult,
+  AgentStatus,
+  AgentMessage,
+  AgentReply,
 } from "./types";
 
 interface Envelope<T> {
@@ -240,6 +243,21 @@ export const followersApi = {
   getBatchJobResults: (jobId: string) =>
     apiClient.get<{ data: { job_id: string; rows: FollowerBatchJobResultRow[] } }>(
       `/followers/batch-update-jobs/${jobId}/results`
+    ),
+};
+
+export const agentApi = {
+  status: () => apiClient.get<{ data: AgentStatus }>("/agent/status"),
+  createConversation: () =>
+    apiClient.post<{ data: { conversation_id: string } }>("/agent/conversations", {}),
+  messages: (conversationId: string) =>
+    apiClient.get<{ data: AgentMessage[] }>(
+      `/agent/conversations/${conversationId}/messages`
+    ),
+  sendMessage: (conversationId: string, message: string) =>
+    apiClient.post<{ data: AgentReply }>(
+      `/agent/conversations/${conversationId}/messages`,
+      { message }
     ),
 };
 

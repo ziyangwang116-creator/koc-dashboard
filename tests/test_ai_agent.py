@@ -184,6 +184,52 @@ class _FakeResponses:
         )
 
 
+class _FakeChatCompletions:
+    def __init__(self):
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if len(self.calls) == 1:
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=None,
+                            tool_calls=[
+                                SimpleNamespace(
+                                    id="call-1",
+                                    function=SimpleNamespace(
+                                        name="search_creators",
+                                        arguments=json.dumps(
+                                            {
+                                                "search": "AI测试达人",
+                                                "creator_category": None,
+                                                "contract_type": None,
+                                                "active_only": True,
+                                                "limit": 10,
+                                            },
+                                            ensure_ascii=False,
+                                        ),
+                                    ),
+                                )
+                            ],
+                        )
+                    )
+                ]
+            )
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="AI测试达人当前在达人库中。",
+                        tool_calls=[],
+                    )
+                )
+            ]
+        )
+
+
 def test_agent_service_executes_tools_and_writes_sanitized_audit(tmp_path):
     database_path = tmp_path / "ai.db"
     _seed_ai_database(database_path)
@@ -217,6 +263,34 @@ def test_agent_service_executes_tools_and_writes_sanitized_audit(tmp_path):
     assert audit["tool_name"] == "search_creators"
     assert audit["status"] == "SUCCESS"
     assert "API_KEY" not in audit["arguments_json"]
+
+
+def test_deepseek_agent_uses_chat_completions_tool_loop(tmp_path):
+    database_path = tmp_path / "ai.db"
+    _seed_ai_database(database_path)
+    fake_chat = _FakeChatCompletions()
+    client = SimpleNamespace(chat=SimpleNamespace(completions=fake_chat))
+    service = AIAgentService(
+        database_path,
+        api_key=None,
+        model="deepseek-chat",
+        provider="deepseek",
+        base_url="https://api.deepseek.com",
+        client=client,
+    )
+
+    response = service.ask(
+        conversation_id="conversation-deepseek",
+        session_id="session-1",
+        message="查询 AI测试达人",
+    )
+
+    assert response.answer == "AI测试达人当前在达人库中。"
+    assert response.tool_calls[0]["tool_name"] == "search_creators"
+    assert len(fake_chat.calls) == 2
+    assert fake_chat.calls[0]["tool_choice"] == "auto"
+    assert fake_chat.calls[0]["tools"][0]["type"] == "function"
+    assert any(item["role"] == "tool" for item in fake_chat.calls[1]["messages"])
 
 
 def test_agent_service_surfaces_wrapped_rate_limit_errors(tmp_path):
