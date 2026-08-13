@@ -563,8 +563,28 @@ def _validate_pagination(page: int, page_size: int) -> None:
         raise validation_error(f"page_size 必须在 1 到 {MAX_PAGE_SIZE} 之间。", "page_size")
 
 
-def _summary_dict(result) -> dict[str, Any]:
-    return {
+_FOLLOWERS_NOT_UPDATED_STATUSES = {"待补充粉丝数", "未更新粉丝数"}
+
+
+def _status_summary(details: pd.DataFrame, row_converter) -> dict[str, int]:
+    counts = {
+        "settleable_creator_count": 0,
+        "not_reached_creator_count": 0,
+        "followers_not_updated_count": 0,
+    }
+    for _, row in details.iterrows():
+        status = _text_or_none(row_converter(row).get("settlement_status"))
+        if status == "可结算":
+            counts["settleable_creator_count"] += 1
+        elif status == "未达标":
+            counts["not_reached_creator_count"] += 1
+        elif status in _FOLLOWERS_NOT_UPDATED_STATUSES:
+            counts["followers_not_updated_count"] += 1
+    return counts
+
+
+def _summary_dict(result, row_converter) -> dict[str, Any]:
+    summary = {
         "total_amount_jpy": int(result.total_amount_jpy),
         "creator_receivable_jpy": int(result.creator_receivable_jpy),
         "youdao_receivable_jpy": int(result.youdao_receivable_jpy),
@@ -574,6 +594,27 @@ def _summary_dict(result) -> dict[str, Any]:
         "total_video_views": int(result.total_video_views),
         "overall_cpm": _float_or_none(result.overall_cpm),
     }
+    summary.update(_status_summary(result.details, row_converter))
+    return summary
+
+
+def _stored_summary_dict(
+    summary: dict[str, Any],
+    details: pd.DataFrame,
+    row_converter,
+) -> dict[str, Any]:
+    result = {
+        "total_amount_jpy": int(summary.get("total_amount_jpy", 0)),
+        "creator_receivable_jpy": int(summary.get("creator_receivable_jpy", 0)),
+        "youdao_receivable_jpy": int(summary.get("youdao_receivable_jpy", 0)),
+        "creator_receivable_usd": float(summary.get("creator_receivable_usd", 0)),
+        "youdao_receivable_usd": float(summary.get("youdao_receivable_usd", 0)),
+        "settled_views": int(summary.get("settled_views", 0)),
+        "total_video_views": int(summary.get("total_video_views", 0)),
+        "overall_cpm": _float_or_none(summary.get("overall_cpm")),
+    }
+    result.update(_status_summary(details, row_converter))
+    return result
 
 
 def _version_meta(version) -> dict[str, Any]:
@@ -839,16 +880,7 @@ def build_compensation_router(
             mode = _mode_for_status(version.status)
             jpy_to_usd_rate = version.jpy_to_usd_rate
             traffic_boost_enabled = bool(summary.get("traffic_boost_enabled", False))
-            summary_out = {
-                "total_amount_jpy": int(summary.get("total_amount_jpy", 0)),
-                "creator_receivable_jpy": int(summary.get("creator_receivable_jpy", 0)),
-                "youdao_receivable_jpy": int(summary.get("youdao_receivable_jpy", 0)),
-                "creator_receivable_usd": float(summary.get("creator_receivable_usd", 0)),
-                "youdao_receivable_usd": float(summary.get("youdao_receivable_usd", 0)),
-                "settled_views": int(summary.get("settled_views", 0)),
-                "total_video_views": int(summary.get("total_video_views", 0)),
-                "overall_cpm": _float_or_none(summary.get("overall_cpm")),
-            }
+            summary_out = _stored_summary_dict(summary, details, _grassroot_api_row)
             version_meta = _version_meta(version)
         else:
             jpy_to_usd_rate = repository.get_jpy_to_usd_rate(period_key)
@@ -870,7 +902,7 @@ def build_compensation_router(
                 traffic_boost_enabled=traffic_boost_enabled,
             )
             details = result.details
-            summary_out = _summary_dict(result)
+            summary_out = _summary_dict(result, _grassroot_api_row)
             mode = "preview"
             version_meta = None
 
@@ -960,16 +992,7 @@ def build_compensation_router(
             mode = _mode_for_status(version.status)
             jpy_to_usd_rate = version.jpy_to_usd_rate
             traffic_boost_enabled = bool(summary.get("traffic_boost_enabled", False))
-            summary_out = {
-                "total_amount_jpy": int(summary.get("total_amount_jpy", 0)),
-                "creator_receivable_jpy": int(summary.get("creator_receivable_jpy", 0)),
-                "youdao_receivable_jpy": int(summary.get("youdao_receivable_jpy", 0)),
-                "creator_receivable_usd": float(summary.get("creator_receivable_usd", 0)),
-                "youdao_receivable_usd": float(summary.get("youdao_receivable_usd", 0)),
-                "settled_views": int(summary.get("settled_views", 0)),
-                "total_video_views": int(summary.get("total_video_views", 0)),
-                "overall_cpm": _float_or_none(summary.get("overall_cpm")),
-            }
+            summary_out = _stored_summary_dict(summary, details, _long_term_api_row)
             version_meta = _version_meta(version)
         else:
             jpy_to_usd_rate = repository.get_jpy_to_usd_rate(period_key)
@@ -999,7 +1022,7 @@ def build_compensation_router(
                 traffic_boost_enabled=traffic_boost_enabled,
             )
             details = result.details
-            summary_out = _summary_dict(result)
+            summary_out = _summary_dict(result, _long_term_api_row)
             mode = "preview"
             version_meta = None
 
@@ -1080,16 +1103,7 @@ def build_compensation_router(
             summary = version.summary
             mode = _mode_for_status(version.status)
             jpy_to_usd_rate = version.jpy_to_usd_rate
-            summary_out = {
-                "total_amount_jpy": int(summary.get("total_amount_jpy", 0)),
-                "creator_receivable_jpy": int(summary.get("creator_receivable_jpy", 0)),
-                "youdao_receivable_jpy": int(summary.get("youdao_receivable_jpy", 0)),
-                "creator_receivable_usd": float(summary.get("creator_receivable_usd", 0)),
-                "youdao_receivable_usd": float(summary.get("youdao_receivable_usd", 0)),
-                "settled_views": int(summary.get("settled_views", 0)),
-                "total_video_views": int(summary.get("total_video_views", 0)),
-                "overall_cpm": _float_or_none(summary.get("overall_cpm")),
-            }
+            summary_out = _stored_summary_dict(summary, details, _commentary_api_row)
             version_meta = _version_meta(version)
         else:
             jpy_to_usd_rate = repository.get_jpy_to_usd_rate(period_key)
@@ -1116,7 +1130,7 @@ def build_compensation_router(
                 theme_definitions=definitions,
             )
             details = result.details
-            summary_out = _summary_dict(result)
+            summary_out = _summary_dict(result, _commentary_api_row)
             mode = "preview"
             version_meta = None
 

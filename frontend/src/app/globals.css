@@ -100,6 +100,16 @@ select {
   min-width: 160px;
 }
 
+.compensation-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.compensation-summary-wide {
+  grid-column: span 2;
+}
+
 @media (max-width: 768px) {
   .app-shell {
     flex-direction: column;
@@ -115,6 +125,12 @@ select {
   }
   .metric-card {
     flex: 1 1 45%;
+  }
+  .compensation-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .compensation-summary-wide {
+    grid-column: span 2;
   }
 }
 

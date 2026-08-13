@@ -8,7 +8,7 @@ import { StateShell } from "@/components/DataStates";
 import { ModeBadge } from "@/components/ModeBadge";
 import { compensationApi, dashboardApi } from "@/lib/endpoints";
 import { ApiError } from "@/lib/api-client";
-import { fmtUsd, fmtCpm } from "@/lib/format";
+import { fmtUsd, fmtInt } from "@/lib/format";
 import {
   grassrootColumns as fullGrassrootColumns,
   longTermColumns as fullLongTermColumns,
@@ -126,6 +126,7 @@ export default function CompensationPage() {
   const activeQuery = lane === "GRASSROOT" ? grassrootQuery : lane === "LONG_TERM" ? longTermQuery : commentaryQuery;
   const mode: CompensationMode = (activeQuery.data?.meta.mode as CompensationMode) ?? "preview";
   const summary = activeQuery.data?.meta.summary;
+  const laneLabel = LANES.find((item) => item.key === lane)?.label ?? "";
   const currentRate = activeQuery.data?.meta.jpy_to_usd_rate;
 
   // Sync local editable drafts from server data using the React-documented
@@ -543,16 +544,30 @@ export default function CompensationPage() {
         )}
 
         {summary && (
-          <div className="metric-row">
+          <div className="compensation-summary-grid">
             <div className="metric-card" style={summaryCard}>
-              <div style={summaryLabel}>
-                {lane === "GRASSROOT" ? "博主应收美元合计（主展示口径）" : "博主应收美元合计"}
-              </div>
-              <div style={summaryValue}>{fmtUsd(summary.creator_receivable_usd as number)}</div>
+              <div style={summaryLabel}>{laneLabel}总体 CPM</div>
+              <div style={summaryValue}>{fmtUsd(summary.overall_cpm as number)}</div>
             </div>
             <div className="metric-card" style={summaryCard}>
-              <div style={summaryLabel}>整体 CPM</div>
-              <div style={summaryValue}>{fmtCpm(summary.overall_cpm as number)}</div>
+              <div style={summaryLabel}>可结算达人</div>
+              <div style={summaryValue}>{fmtInt(summary.settleable_creator_count as number)}</div>
+            </div>
+            <div className="metric-card" style={summaryCard}>
+              <div style={summaryLabel}>未达标达人</div>
+              <div style={summaryValue}>{fmtInt(summary.not_reached_creator_count as number)}</div>
+            </div>
+            <div className="metric-card" style={summaryCard}>
+              <div style={summaryLabel}>未更新粉丝数</div>
+              <div style={summaryValue}>{fmtInt(summary.followers_not_updated_count as number)}</div>
+            </div>
+            <div className="metric-card compensation-summary-wide" style={summaryCard}>
+              <div style={summaryLabel}>博主应收（美元）总额</div>
+              <div style={summaryValue}>{fmtUsd(summary.creator_receivable_usd as number)}</div>
+            </div>
+            <div className="metric-card compensation-summary-wide" style={summaryCard}>
+              <div style={summaryLabel}>有道应收（美元）（包含服务费）总额</div>
+              <div style={summaryValue}>{fmtUsd(summary.youdao_receivable_usd as number)}</div>
             </div>
           </div>
         )}
