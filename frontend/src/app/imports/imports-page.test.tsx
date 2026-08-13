@@ -3,13 +3,14 @@ import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderWithQueryClient } from "@/test-utils";
 import { ApiError } from "@/lib/api-client";
+import type { ImportPreview } from "@/lib/types";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: vi.fn(), push: vi.fn() }),
   usePathname: () => "/imports",
 }));
 
-const previewResponse = {
+const previewResponse: { data: ImportPreview } = {
   data: {
     preview_token: "token-1",
     input_row_count: 2,
@@ -183,7 +184,7 @@ describe("ImportsPage", () => {
     await waitFor(() => expect(previewMock).toHaveBeenCalledTimes(1));
     expect(await screen.findByText("新增")).toBeInTheDocument();
     expect(screen.getByText("更新")).toBeInTheDocument();
-    expect(screen.getByText("删除")).toBeInTheDocument();
+    expect(screen.getByText(/补充导入不会删除该月已有投稿/)).toBeInTheDocument();
     expect(screen.getByText("未匹配达人")).toBeInTheDocument();
     expect(screen.getByText("日期异常")).toBeInTheDocument();
   });
@@ -196,12 +197,12 @@ describe("ImportsPage", () => {
     await user.upload(fileInput, fakeFile());
     await user.click(screen.getByRole("button", { name: "生成预览" }));
 
-    const confirmBtn = await screen.findByRole("button", { name: "确认导入（按月完整替换）" });
+    const confirmBtn = await screen.findByRole("button", { name: "确认导入（补充导入）" });
     expect(confirmBtn).toBeDisabled();
     expect(screen.getByText(/无法确认导入/)).toBeInTheDocument();
   });
 
-  it("requires a second explicit confirmation before confirming an import", async () => {
+  it("defaults to supplement import and requires a second explicit confirmation", async () => {
     previewMock.mockResolvedValueOnce(previewResponseNoUnmatched);
     const user = userEvent.setup();
     renderWithQueryClient(<ImportsPage />);
@@ -210,19 +211,48 @@ describe("ImportsPage", () => {
     await user.upload(fileInput, fakeFile());
     await user.click(screen.getByRole("button", { name: "生成预览" }));
 
-    const confirmBtn = await screen.findByRole("button", { name: "确认导入（按月完整替换）" });
+    const confirmBtn = await screen.findByRole("button", { name: "确认导入（补充导入）" });
     expect(confirmBtn).toBeEnabled();
     await user.click(confirmBtn);
 
     const dialogConfirmBtn = screen.getByRole("button", { name: "确认执行" });
     expect(dialogConfirmBtn).toBeDisabled();
 
-    await user.click(screen.getByRole("checkbox", { name: /我确认要执行本次按月完整替换导入/ }));
+    await user.click(screen.getByRole("checkbox", { name: /我确认要执行本次补充导入/ }));
     expect(dialogConfirmBtn).toBeEnabled();
     await user.click(dialogConfirmBtn);
 
     await waitFor(() => expect(confirmMock).toHaveBeenCalledTimes(1));
-    expect(confirmMock).toHaveBeenCalledWith("token-1", { mode: "replace_months" }, expect.objectContaining({ idempotencyKey: expect.any(String) }));
+    expect(confirmMock).toHaveBeenCalledWith("token-1", { mode: "append_or_update" }, expect.objectContaining({ idempotencyKey: expect.any(String) }));
+  });
+
+  it("allows switching to full-month replacement explicitly", async () => {
+    previewMock.mockResolvedValueOnce({
+      data: {
+        ...previewResponseNoUnmatched.data,
+        removals: {
+          count: 1,
+          rows: [{ title: "旧投稿", url: "https://x.com/old" }] as Record<string, unknown>[],
+        },
+      },
+    });
+    const user = userEvent.setup();
+    renderWithQueryClient(<ImportsPage />);
+
+    await user.click(screen.getByRole("radio", { name: "按月份完整替换" }));
+    await user.upload(screen.getByLabelText("导入看板数据库文件"), fakeFile());
+    await user.click(screen.getByRole("button", { name: "生成预览" }));
+
+    expect(await screen.findByText("完整替换时将删除")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "确认导入（按月份完整替换）" }));
+    await user.click(screen.getByRole("checkbox", { name: /我确认要执行本次按月份完整替换导入/ }));
+    await user.click(screen.getByRole("button", { name: "确认执行" }));
+
+    await waitFor(() => expect(confirmMock).toHaveBeenCalledWith(
+      "token-1",
+      { mode: "replace_months" },
+      expect.objectContaining({ idempotencyKey: expect.any(String) })
+    ));
   });
 
   it("disables rollback for a non-most-recent batch and allows it for the latest one", async () => {
@@ -286,9 +316,9 @@ describe("ImportsPage", () => {
     await user.upload(fileInput, fakeFile());
     await user.click(screen.getByRole("button", { name: "生成预览" }));
 
-    const confirmBtn = await screen.findByRole("button", { name: "确认导入（按月完整替换）" });
+    const confirmBtn = await screen.findByRole("button", { name: "确认导入（补充导入）" });
     await user.click(confirmBtn);
-    await user.click(screen.getByRole("checkbox", { name: /我确认要执行本次按月完整替换导入/ }));
+    await user.click(screen.getByRole("checkbox", { name: /我确认要执行本次补充导入/ }));
     await user.click(screen.getByRole("button", { name: "确认执行" }));
 
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("存在未匹配的创建者。"));

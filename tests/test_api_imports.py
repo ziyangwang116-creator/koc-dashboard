@@ -231,6 +231,45 @@ def test_confirm_success_creates_snapshot_and_replaces(tmp_path):
     assert snapshot_rows is not None
 
 
+def test_append_or_update_preserves_existing_posts_in_same_month(tmp_path):
+    database_path = tmp_path / "koc.db"
+    creator = _seed_creator(database_path, f"{PREFIX}append")
+    client = _authenticated_client(database_path)
+
+    initial = _upload_preview(
+        client,
+        [_row(creator.user_id, url="https://x.com/original", title="original", date="2026-01-05")],
+    )
+    initial_token = initial.json()["data"]["preview_token"]
+    initial_confirm = client.post(
+        f"/api/imports/{initial_token}/confirm",
+        json={"mode": "replace_months"},
+        headers={"Idempotency-Key": "append-initial-1"},
+    )
+    assert initial_confirm.status_code == 200
+
+    supplement = _upload_preview(
+        client,
+        [_row(creator.user_id, url="https://x.com/supplement", title="supplement", date="2026-01-20")],
+    )
+    supplement_token = supplement.json()["data"]["preview_token"]
+    supplement_confirm = client.post(
+        f"/api/imports/{supplement_token}/confirm",
+        json={"mode": "append_or_update"},
+        headers={"Idempotency-Key": "append-supplement-1"},
+    )
+
+    assert supplement_confirm.status_code == 200
+    result = supplement_confirm.json()["data"]
+    assert result["mode"] == "APPEND_OR_UPDATE"
+    assert result["removed_count"] == 0
+    posts = DashboardRepository(database_path).load_posts()
+    assert set(posts["url"]) == {
+        "https://x.com/original",
+        "https://x.com/supplement",
+    }
+
+
 def test_duplicate_confirm_same_idempotency_key_returns_cached_result(tmp_path):
     database_path = tmp_path / "koc.db"
     _seed_creator(database_path, f"{PREFIX}a")

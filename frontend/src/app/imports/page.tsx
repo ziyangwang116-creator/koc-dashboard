@@ -39,10 +39,29 @@ function newIdempotencyKey(): string {
     : `key-${Date.now()}-${Math.random()}`;
 }
 
+type ImportMode = "append_or_update" | "replace_months";
+
+const IMPORT_MODE_COPY: Record<
+  ImportMode,
+  { label: string; description: string; confirmLabel: string }
+> = {
+  append_or_update: {
+    label: "补充导入",
+    description: "保留数据库中已有投稿，仅新增新链接，并更新平台 + URL 相同的投稿。",
+    confirmLabel: "我确认要执行本次补充导入",
+  },
+  replace_months: {
+    label: "按月份完整替换",
+    description: "删除覆盖月份的原有投稿后写入本次完整文件，并自动保存可回滚快照。",
+    confirmLabel: "我确认要执行本次按月份完整替换导入",
+  },
+};
+
 export default function ImportsPage() {
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [importMode, setImportMode] = useState<ImportMode>("append_or_update");
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [confirmError, setConfirmError] = useState<string | null>(null);
@@ -83,7 +102,7 @@ export default function ImportsPage() {
     mutationFn: () =>
       importsApi.confirm(
         preview!.preview_token,
-        { mode: "replace_months" },
+        { mode: importMode },
         { idempotencyKey: newIdempotencyKey() }
       ),
     onSuccess: () => {
@@ -135,6 +154,8 @@ export default function ImportsPage() {
   });
 
   const hasUnmatched = (preview?.unmatched_creators.count ?? 0) > 0;
+  const isReplaceMode = importMode === "replace_months";
+  const importModeCopy = IMPORT_MODE_COPY[importMode];
 
   // A batch may only be rolled back if it is the most recent REPLACE_MONTHS
   // batch covering its month(s) — derived client-side from the batch list,
@@ -179,9 +200,38 @@ export default function ImportsPage() {
         <div style={panelStyle}>
           <h3 style={{ marginTop: 0 }}>导入看板数据库</h3>
           <p style={{ color: "var(--color-text-muted)", fontSize: 12.5 }}>
-            上传 Rapid Query 导出的 Excel 文件，系统会先生成预览（新增/更新/删除/未匹配达人/日期异常），
-            确认后才会按月完整替换并写入数据库；替换前会自动保存快照，可在下方「导入历史」中回滚。
+            上传 Rapid Query 导出的 Excel 文件，系统会先生成新增、更新、未匹配达人和日期异常预览，确认后才写入数据库。
           </p>
+          <fieldset style={modeFieldset}>
+            <legend style={modeLegend}>导入方式</legend>
+            <div style={modeSelector}>
+              {(Object.keys(IMPORT_MODE_COPY) as ImportMode[]).map((mode) => (
+                <label
+                  key={mode}
+                  style={{
+                    ...modeOption,
+                    ...(importMode === mode ? modeOptionActive : {}),
+                  }}
+                >
+                  <input
+                    type="radio"
+                    name="import-mode"
+                    value={mode}
+                    checked={importMode === mode}
+                    onChange={() => {
+                      setImportMode(mode);
+                      setConfirmChecked(false);
+                      setConfirmError(null);
+                    }}
+                  />
+                  <span>{IMPORT_MODE_COPY[mode].label}</span>
+                </label>
+              ))}
+            </div>
+            <div style={importMode === "replace_months" ? warningStyle : infoStyle}>
+              {importModeCopy.description}
+            </div>
+          </fieldset>
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <input
               ref={fileInputRef}
@@ -212,13 +262,17 @@ export default function ImportsPage() {
               <div style={{ display: "flex", gap: 12, flexWrap: "wrap", fontSize: 13 }}>
                 <span>输入行数：{preview.input_row_count}</span>
                 <span>匹配行数：{preview.matched_row_count}</span>
-                <span>覆盖月份：{preview.period_months.join("、") || "—"}</span>
+                <span>数据月份：{preview.period_months.join("、") || "—"}</span>
                 <span>命中异业排除：{preview.cross_industry_flagged_count}</span>
               </div>
 
               <DiffSection title="新增" bucket={preview.additions} columns={diffColumns} />
               <DiffSection title="更新" bucket={preview.updates} columns={diffColumns} />
-              <DiffSection title="删除" bucket={preview.removals} columns={diffColumns} />
+              {isReplaceMode ? (
+                <DiffSection title="完整替换时将删除" bucket={preview.removals} columns={diffColumns} tone="warning" />
+              ) : (
+                <div style={infoStyle}>补充导入不会删除该月已有投稿，本次预览中的缺失记录将继续保留。</div>
+              )}
               <DiffSection
                 title="未匹配达人"
                 bucket={preview.unmatched_creators}
@@ -248,7 +302,7 @@ export default function ImportsPage() {
                   title={hasUnmatched ? "存在未匹配达人，确认导入已被阻止" : undefined}
                   onClick={() => setConfirmDialogOpen(true)}
                 >
-                  确认导入（按月完整替换）
+                  确认导入（{importModeCopy.label}）
                 </button>
               </div>
             </div>
@@ -281,7 +335,9 @@ export default function ImportsPage() {
                   return (
                     <tr key={batch.batch_id}>
                       <td style={tdCell}>#{batch.batch_id}</td>
-                      <td style={tdCell}>{batch.mode}</td>
+                      <td style={tdCell}>
+                        {batch.mode === "REPLACE_MONTHS" ? "按月份完整替换" : "补充导入"}
+                      </td>
                       <td style={tdCell}>{batch.period_months.join("、") || "—"}</td>
                       <td style={tdCell}>
                         {batch.input_count}/{batch.saved_count}/{batch.removed_count}
@@ -389,8 +445,16 @@ export default function ImportsPage() {
           <div style={{ ...modalBox, borderTop: "4px solid var(--color-primary)" }}>
             <h3 style={{ margin: 0 }}>确认导入</h3>
             <p style={{ color: "var(--color-text-muted)", fontSize: 12.5 }}>
-              即将按月完整替换覆盖月份 {preview.period_months.join("、") || "—"} 的全部投稿数据。
-              替换前会自动保存快照，可在导入历史中回滚。该操作会写入数据库，请确认无误后再继续。
+              {isReplaceMode ? (
+                <>
+                  即将完整替换 {preview.period_months.join("、") || "—"} 的全部投稿数据，并删除未出现在本次文件中的旧投稿。
+                  替换前会自动保存快照，可在导入历史中回滚。
+                </>
+              ) : (
+                <>
+                  即将补充 {preview.period_months.join("、") || "—"} 的投稿数据。现有投稿不会删除；平台和 URL 相同的记录会更新，其他记录会新增。
+                </>
+              )}
             </p>
             <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5 }}>
               <input
@@ -398,7 +462,7 @@ export default function ImportsPage() {
                 checked={confirmChecked}
                 onChange={(e) => setConfirmChecked(e.target.checked)}
               />
-              我确认要执行本次按月完整替换导入
+              {importModeCopy.confirmLabel}
             </label>
             <div style={{ display: "flex", gap: 8, marginTop: 12, justifyContent: "flex-end" }}>
               <button
@@ -843,6 +907,42 @@ const modalBox: React.CSSProperties = {
   width: 460,
   maxWidth: "90vw",
   boxShadow: "0 8px 30px rgba(0,0,0,0.2)",
+};
+
+const modeFieldset: React.CSSProperties = {
+  border: 0,
+  padding: 0,
+  margin: "0 0 14px",
+};
+
+const modeLegend: React.CSSProperties = {
+  fontSize: 12.5,
+  fontWeight: 700,
+  marginBottom: 6,
+};
+
+const modeSelector: React.CSSProperties = {
+  display: "inline-flex",
+  border: "1px solid var(--color-border)",
+  borderRadius: "var(--radius)",
+  overflow: "hidden",
+};
+
+const modeOption: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
+  padding: "7px 12px",
+  fontSize: 12.5,
+  cursor: "pointer",
+  background: "var(--color-surface)",
+  color: "var(--color-text-muted)",
+};
+
+const modeOptionActive: React.CSSProperties = {
+  background: "var(--color-primary-bg)",
+  color: "var(--color-primary-dark)",
+  fontWeight: 700,
 };
 
 const standardizeControls: React.CSSProperties = {
