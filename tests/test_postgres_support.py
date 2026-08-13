@@ -12,6 +12,7 @@ from database.db import (
 )
 from database.postgres_schema import (
     POSTGRES_COMMENTARY_THEME_COMPAT_MIGRATION_ID,
+    POSTGRES_IMPORT_ROLLBACK_AND_LOCK_AUDIT_MIGRATION_ID,
     POSTGRES_SCHEMA_MIGRATION_ID,
     POSTGRES_SCHEMA_STATEMENTS,
     apply_postgres_migrations,
@@ -213,6 +214,7 @@ def test_postgres_schema_covers_all_current_business_tables():
         "creator_profile_history",
         "dashboard_cross_industry_exclusion",
         "dashboard_import_batch",
+        "dashboard_import_batch_snapshot",
         "dashboard_post",
         "dashboard_traffic_boost_setting",
         "follower_update_audit",
@@ -249,6 +251,29 @@ def test_postgres_compatibility_migration_repairs_commentary_theme_objects():
         parameters
         for sql, parameters in connection.executed
         if "INSERT INTO schema_migrations" in sql and POSTGRES_COMMENTARY_THEME_COMPAT_MIGRATION_ID in parameters
+    )
+
+
+def test_postgres_forward_migration_repairs_import_rollback_and_lock_audit():
+    connection = _FakeConnection()
+
+    apply_postgres_migrations(connection, ())
+
+    executed_sql = "\n".join(sql for sql, _ in connection.executed)
+    assert "CREATE TABLE IF NOT EXISTS dashboard_import_batch_snapshot" in executed_sql
+    assert "ADD COLUMN IF NOT EXISTS rolled_back_at" in executed_sql
+    for table_name in (
+        "grassroot_compensation_version",
+        "long_term_compensation_version",
+        "commentary_compensation_version",
+    ):
+        assert f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS lock_note" in executed_sql
+        assert f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS locked_by" in executed_sql
+    assert POSTGRES_IMPORT_ROLLBACK_AND_LOCK_AUDIT_MIGRATION_ID in next(
+        parameters
+        for sql, parameters in connection.executed
+        if "INSERT INTO schema_migrations" in sql
+        and POSTGRES_IMPORT_ROLLBACK_AND_LOCK_AUDIT_MIGRATION_ID in parameters
     )
 
 

@@ -32,6 +32,8 @@ const versionsResponse = {
       created_at: "2026-07-01T00:00:00Z",
       updated_at: "2026-07-01T00:00:00Z",
       locked_at: null,
+      lock_note: null,
+      locked_by: null,
       summary: {},
     },
     {
@@ -44,6 +46,8 @@ const versionsResponse = {
       created_at: "2026-07-02T00:00:00Z",
       updated_at: "2026-07-02T00:00:00Z",
       locked_at: "2026-07-05T00:00:00Z",
+      lock_note: "月末锁定",
+      locked_by: "测试员",
       summary: {},
     },
   ],

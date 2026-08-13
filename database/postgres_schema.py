@@ -6,6 +6,9 @@ from typing import Any
 
 POSTGRES_SCHEMA_MIGRATION_ID = "postgres_v2_ai_agent"
 POSTGRES_COMMENTARY_THEME_COMPAT_MIGRATION_ID = "postgres_v3_commentary_theme_objects"
+POSTGRES_IMPORT_ROLLBACK_AND_LOCK_AUDIT_MIGRATION_ID = (
+    "postgres_v4_import_rollback_and_lock_audit"
+)
 
 
 POSTGRES_SCHEMA_STATEMENTS = (
@@ -147,6 +150,18 @@ POSTGRES_SCHEMA_STATEMENTS = (
         saved_count BIGINT NOT NULL,
         removed_count BIGINT NOT NULL DEFAULT 0,
         report_json TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+        rolled_back_at TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS dashboard_import_batch_snapshot (
+        id BIGSERIAL PRIMARY KEY,
+        batch_id BIGINT NOT NULL REFERENCES dashboard_import_batch(id) ON DELETE CASCADE,
+        record_key TEXT NOT NULL,
+        source_file TEXT NOT NULL,
+        publish_date TEXT,
+        payload_json TEXT NOT NULL,
         created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)
     )
     """,
@@ -239,6 +254,8 @@ POSTGRES_SCHEMA_STATEMENTS = (
         created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
         updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
         locked_at TEXT,
+        lock_note TEXT,
+        locked_by TEXT,
         UNIQUE (period_month, version_no)
     )
     """,
@@ -265,6 +282,8 @@ POSTGRES_SCHEMA_STATEMENTS = (
         created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
         updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
         locked_at TEXT,
+        lock_note TEXT,
+        locked_by TEXT,
         UNIQUE (period_month, version_no)
     )
     """,
@@ -332,6 +351,8 @@ POSTGRES_SCHEMA_STATEMENTS = (
         created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
         updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
         locked_at TEXT,
+        lock_note TEXT,
+        locked_by TEXT,
         UNIQUE (period_month, version_no)
     )
     """,
@@ -386,6 +407,7 @@ POSTGRES_INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_dashboard_post_publish_date ON dashboard_post(publish_date)",
     "CREATE INDEX IF NOT EXISTS idx_dashboard_post_source_file ON dashboard_post(source_file)",
     "CREATE INDEX IF NOT EXISTS idx_dashboard_post_import_batch ON dashboard_post(import_batch_id)",
+    "CREATE INDEX IF NOT EXISTS idx_dashboard_import_snapshot_batch ON dashboard_import_batch_snapshot(batch_id)",
     "CREATE INDEX IF NOT EXISTS idx_cross_industry_active ON dashboard_cross_industry_exclusion(active, platform)",
     "CREATE INDEX IF NOT EXISTS idx_follower_audit_user_time ON follower_update_audit(user_id, fetched_at)",
     "CREATE INDEX IF NOT EXISTS idx_compensation_version_period ON grassroot_compensation_version(period_month, version_no DESC)",
@@ -448,6 +470,33 @@ POSTGRES_COMMENTARY_THEME_COMPAT_STATEMENTS = (
 POSTGRES_COMMENTARY_THEME_COMPAT_INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_commentary_theme_submission_period "
     "ON commentary_theme_submission(period_month, creator_id)",
+)
+
+
+POSTGRES_IMPORT_ROLLBACK_AND_LOCK_AUDIT_STATEMENTS = (
+    """
+    CREATE TABLE IF NOT EXISTS dashboard_import_batch_snapshot (
+        id BIGSERIAL PRIMARY KEY,
+        batch_id BIGINT NOT NULL REFERENCES dashboard_import_batch(id) ON DELETE CASCADE,
+        record_key TEXT NOT NULL,
+        source_file TEXT NOT NULL,
+        publish_date TEXT,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)
+    )
+    """,
+    "ALTER TABLE dashboard_import_batch ADD COLUMN IF NOT EXISTS rolled_back_at TEXT",
+    "ALTER TABLE grassroot_compensation_version ADD COLUMN IF NOT EXISTS lock_note TEXT",
+    "ALTER TABLE grassroot_compensation_version ADD COLUMN IF NOT EXISTS locked_by TEXT",
+    "ALTER TABLE long_term_compensation_version ADD COLUMN IF NOT EXISTS lock_note TEXT",
+    "ALTER TABLE long_term_compensation_version ADD COLUMN IF NOT EXISTS locked_by TEXT",
+    "ALTER TABLE commentary_compensation_version ADD COLUMN IF NOT EXISTS lock_note TEXT",
+    "ALTER TABLE commentary_compensation_version ADD COLUMN IF NOT EXISTS locked_by TEXT",
+)
+
+POSTGRES_IMPORT_ROLLBACK_AND_LOCK_AUDIT_INDEX_STATEMENTS = (
+    "CREATE INDEX IF NOT EXISTS idx_dashboard_import_snapshot_batch "
+    "ON dashboard_import_batch_snapshot(batch_id)",
 )
 
 
@@ -558,5 +607,19 @@ def apply_postgres_migrations(
         connection.execute(
             "INSERT INTO schema_migrations (migration_id) VALUES (?)",
             (POSTGRES_COMMENTARY_THEME_COMPAT_MIGRATION_ID,),
+        )
+
+    forward_applied = connection.execute(
+        "SELECT 1 FROM schema_migrations WHERE migration_id = ?",
+        (POSTGRES_IMPORT_ROLLBACK_AND_LOCK_AUDIT_MIGRATION_ID,),
+    ).fetchone()
+    if forward_applied is None:
+        for statement in POSTGRES_IMPORT_ROLLBACK_AND_LOCK_AUDIT_STATEMENTS:
+            connection.execute(statement)
+        for statement in POSTGRES_IMPORT_ROLLBACK_AND_LOCK_AUDIT_INDEX_STATEMENTS:
+            connection.execute(statement)
+        connection.execute(
+            "INSERT INTO schema_migrations (migration_id) VALUES (?)",
+            (POSTGRES_IMPORT_ROLLBACK_AND_LOCK_AUDIT_MIGRATION_ID,),
         )
     _seed_default_creators(connection, seed_records)

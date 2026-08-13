@@ -32,10 +32,15 @@ export interface Creator {
   homepage_url: string | null;
   follower_count: number | null;
   youtube_user_id: string | null;
+  youtube_homepage_url: string | null;
   youtube_follower_count: number | null;
   tiktok_user_id: string | null;
+  tiktok_homepage_url: string | null;
   tiktok_follower_count: number | null;
+  follower_raw_display_value: string | null;
   follower_source: string | null;
+  follower_count_is_estimated: boolean | null;
+  follower_count_updated_at: string | null;
   follower_sync_status: string;
   settlement_eligible: boolean;
   active: boolean;
@@ -114,14 +119,32 @@ export interface DashboardSummaryRow {
 }
 
 export interface DashboardPostRow {
+  source_file: string | null;
   creator_key: string;
   user_id: string;
+  creator_id: number | null;
+  creator_active: boolean;
+  profile_effective_date: string | null;
   koc_name: string;
+  creator_label: string | null;
+  kol_name: string | null;
   creator_category: string | null;
   contract_types: string[];
+  contract_start_date: string | null;
+  contract_end_date: string | null;
+  follower_count: number | null;
+  homepage_url: string | null;
+  youtube_user_id: string | null;
+  youtube_homepage_url: string | null;
+  youtube_follower_count: number | null;
+  tiktok_user_id: string | null;
+  tiktok_homepage_url: string | null;
+  tiktok_follower_count: number | null;
   source_platform: string;
   content_type: string;
   subtype: string;
+  description: string | null;
+  timestamp: string | null;
   title: string;
   url: string;
   publish_date: string | null;
@@ -134,11 +157,13 @@ export interface DashboardPostRow {
   comment: number | null;
   reposted: number | null;
   collect: number | null;
+  cross_industry_url_key: string | null;
   matched: boolean;
   profile_status: string;
   is_cross_industry: boolean;
   compensation_eligible: boolean;
   cross_industry_reason: string | null;
+  cross_industry_exclusion_id: number | null;
 }
 
 export interface ComparisonPoint {
@@ -151,6 +176,8 @@ export interface ComparisonSeriesEntry {
   points: ComparisonPoint[];
   change_rate: number | null;
   warning: boolean;
+  post_count_change_rate?: number | null;
+  post_count_warning?: boolean;
 }
 
 export interface ComparisonSeries {
@@ -249,6 +276,8 @@ export interface CompensationVersion {
   created_at: string;
   updated_at: string;
   locked_at: string | null;
+  lock_note: string | null;
+  locked_by: string | null;
   summary: Record<string, number | null>;
 }
 

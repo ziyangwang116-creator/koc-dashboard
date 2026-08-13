@@ -1197,6 +1197,8 @@ def build_compensation_router(
                     "created_at": version.created_at,
                     "updated_at": version.updated_at,
                     "locked_at": version.locked_at,
+                    "lock_note": version.lock_note,
+                    "locked_by": version.locked_by,
                     "summary": {
                         "total_amount_jpy": _int_or_none(summary.get("total_amount_jpy")) or 0,
                         "creator_receivable_jpy": _int_or_none(summary.get("creator_receivable_jpy")) or 0,

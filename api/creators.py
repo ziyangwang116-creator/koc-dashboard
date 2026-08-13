@@ -369,6 +369,22 @@ def build_creators_router(
                 contract_types=requested_contracts_clean,
                 homepage_url=clean.get("homepage_url", current.homepage_url),
                 follower_count=clean.get("follower_count", current.follower_count),
+                youtube_user_id=clean.get(
+                    "youtube_user_id", current.youtube_user_id
+                ),
+                youtube_homepage_url=clean.get(
+                    "youtube_homepage_url", current.youtube_homepage_url
+                ),
+                youtube_follower_count=clean.get(
+                    "youtube_follower_count", current.youtube_follower_count
+                ),
+                tiktok_user_id=clean.get("tiktok_user_id", current.tiktok_user_id),
+                tiktok_homepage_url=clean.get(
+                    "tiktok_homepage_url", current.tiktok_homepage_url
+                ),
+                tiktok_follower_count=clean.get(
+                    "tiktok_follower_count", current.tiktok_follower_count
+                ),
                 active=bool(clean.get("active", current.active)),
                 note=clean.get("note", current.note),
                 manual_follower_update=bool(clean.get("manual_follower_update", False)),

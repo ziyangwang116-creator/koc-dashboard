@@ -1,19 +1,21 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AppShell } from "@/components/AppShell";
-import { DataTable, type Column } from "@/components/DataTable";
+import { DataTable } from "@/components/DataTable";
 import { StateShell } from "@/components/DataStates";
 import { ModeBadge } from "@/components/ModeBadge";
 import { compensationApi, dashboardApi } from "@/lib/endpoints";
 import { ApiError } from "@/lib/api-client";
-import { fmtInt, fmtUsd, fmtCpm } from "@/lib/format";
+import { fmtUsd, fmtCpm } from "@/lib/format";
+import {
+  grassrootColumns as fullGrassrootColumns,
+  longTermColumns as fullLongTermColumns,
+  commentaryColumns as fullCommentaryColumns,
+} from "./columns";
 import type {
   CompensationMode,
-  CommentaryRow,
-  GrassrootRow,
-  LongTermRow,
   ThemeDefinition,
   ThemeCreatorOption,
   ThemeSubmission,
@@ -310,102 +312,6 @@ export default function CompensationPage() {
     onError: (err) => setActionMessage({ kind: "error", text: errorMessageOf(err) }),
   });
 
-  const grassrootColumns: Column<GrassrootRow>[] = useMemo(
-    () => [
-      { key: "creator_name", header: "达人", width: 110, render: (r) => r.creator_name },
-      { key: "creator_key", header: "UID", width: 110, render: (r) => r.creator_key },
-      { key: "contract_types", header: "合同类型", width: 120, render: (r) => r.contract_types.join("、") || "—" },
-      { key: "followers", header: "粉丝数", width: 90, align: "right", render: (r) => fmtInt(r.followers) },
-      { key: "settlement_status", header: "结算状态", width: 100, render: (r) => r.settlement_status },
-      { key: "rank", header: "等级", width: 60, render: (r) => r.rank },
-      { key: "settlement_subtype", header: "计费类型", width: 110, render: (r) => r.settlement_subtype ?? "—" },
-      { key: "contract_billable_views", header: "合同内播放量", width: 120, align: "right", render: (r) => fmtInt(r.contract_billable_views) },
-      { key: "billable_views", header: "计费播放量", width: 110, align: "right", render: (r) => fmtInt(r.billable_views) },
-      { key: "all_video_views", header: "全部播放量", width: 110, align: "right", render: (r) => fmtInt(r.all_video_views) },
-      { key: "billable_post_count", header: "投稿数", width: 70, align: "right", render: (r) => fmtInt(r.billable_post_count) },
-      { key: "creator_receivable_usd", header: "博主应收美元", width: 120, align: "right", render: (r) => <strong>{fmtUsd(r.creator_receivable_usd)}</strong> },
-      { key: "cpm", header: "CPM", width: 70, align: "right", render: (r) => fmtCpm(r.cpm) },
-    ],
-    []
-  );
-
-  const longTermColumns: Column<LongTermRow>[] = useMemo(
-    () => [
-      { key: "creator_name", header: "达人", width: 110, render: (r) => r.creator_name },
-      { key: "creator_key", header: "UID", width: 110, render: (r) => r.creator_key },
-      { key: "contract_types", header: "合同类型", width: 120, render: (r) => r.contract_types.join("、") || "—" },
-      { key: "contract_start_date", header: "合同开始", width: 105, render: (r) => r.contract_start_date ?? "—" },
-      { key: "contract_end_date", header: "合同截止", width: 105, render: (r) => r.contract_end_date ?? "—" },
-      { key: "settlement_status", header: "结算状态", width: 110, render: (r) => r.settlement_status },
-      { key: "rank", header: "等级", width: 60, render: (r) => r.rank },
-      {
-        key: "monthly_activity_count",
-        header: "活动数",
-        width: 80,
-        align: "right",
-        render: (r) => fmtInt(r.monthly_activity_count),
-      },
-      {
-        key: "monthly_new_post_views",
-        header: "月度播放量",
-        width: 110,
-        align: "right",
-        render: (r) => fmtInt(r.monthly_new_post_views),
-      },
-      { key: "youtube_post_count", header: "YouTube投稿数", width: 115, align: "right", render: (r) => fmtInt(r.youtube_post_count) },
-      { key: "activity_threshold", header: "活动门槛", width: 80, align: "right", render: (r) => fmtInt(r.activity_threshold) },
-      { key: "rank_reward_jpy", header: "等级金额", width: 100, align: "right", render: (r) => fmtInt(r.rank_reward_jpy) },
-      {
-        key: "creator_receivable_usd",
-        header: "博主应收美元",
-        width: 120,
-        align: "right",
-        render: (r) => <strong>{fmtUsd(r.creator_receivable_usd)}</strong>,
-      },
-      { key: "cpm", header: "CPM", width: 70, align: "right", render: (r) => fmtCpm(r.cpm) },
-    ],
-    []
-  );
-
-  const commentaryColumns: Column<CommentaryRow>[] = useMemo(
-    () => [
-      { key: "creator_name", header: "达人", width: 110, render: (r) => r.creator_name },
-      { key: "creator_key", header: "UID", width: 110, render: (r) => r.creator_key },
-      { key: "contract_types", header: "合同类型", width: 140, render: (r) => r.contract_types.join("、") || "—" },
-      { key: "settlement_status", header: "结算状态", width: 100, render: (r) => r.settlement_status },
-      { key: "long_views", header: "长视频播放量", width: 115, align: "right", render: (r) => fmtInt(r.long_views) },
-      { key: "long_final_rank", header: "长视频等级", width: 90, render: (r) => r.long_final_rank ?? "—" },
-      { key: "short_views", header: "短视频播放量", width: 115, align: "right", render: (r) => fmtInt(r.short_views) },
-      { key: "short_final_rank", header: "短视频等级", width: 90, render: (r) => r.short_final_rank ?? "—" },
-      { key: "combined_bonus_jpy", header: "并用奖金", width: 95, align: "right", render: (r) => fmtInt(r.combined_bonus_jpy) },
-      {
-        key: "designated_theme_count",
-        header: "指定主题件数",
-        width: 100,
-        align: "right",
-        render: (r) => fmtInt(r.designated_theme_count),
-      },
-      {
-        key: "designated_theme_reward_jpy",
-        header: "指定主题报酬（日元）",
-        width: 130,
-        align: "right",
-        render: (r) => fmtInt(r.designated_theme_reward_jpy),
-      },
-      { key: "all_paid_views", header: "全部已付费播放量", width: 120, align: "right", render: (r) => fmtInt(r.all_paid_views) },
-      {
-        key: "creator_receivable_usd",
-        header: "博主应收美元",
-        width: 120,
-        align: "right",
-        render: (r) => <strong>{fmtUsd(r.creator_receivable_usd)}</strong>,
-      },
-      { key: "cpm", header: "CPM", width: 70, align: "right", render: (r) => fmtCpm(r.cpm) },
-    ],
-    []
-  );
-
-
   return (
     <AppShell currentPeriod={effectiveMonth}>
       <section style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -552,7 +458,7 @@ export default function CompensationPage() {
             <strong style={{ fontSize: 13 }}>已锁定的历史版本（只读，不可编辑）</strong>
             <div style={{ fontSize: 12.5, color: "var(--color-text-muted)", marginTop: 6 }}>
               v{selectedVersion.version_no ?? "?"} · 锁定时间：{selectedVersion.locked_at ?? "—"} · 锁定备注：
-              {selectedVersion.note ?? "—"}
+              {selectedVersion.lock_note ?? "—"} · 锁定人：{selectedVersion.locked_by ?? "—"}
             </div>
           </div>
         )}
@@ -661,7 +567,7 @@ export default function CompensationPage() {
               isEmpty={(grassrootQuery.data?.data.length ?? 0) === 0}
             >
               <DataTable
-                columns={grassrootColumns}
+                columns={fullGrassrootColumns}
                 rows={grassrootQuery.data?.data ?? []}
                 rowKey={(r) => r.creator_key}
               />
@@ -674,7 +580,7 @@ export default function CompensationPage() {
               errorMessage={longTermQuery.error instanceof ApiError ? longTermQuery.error.message : undefined}
               isEmpty={(longTermQuery.data?.data.length ?? 0) === 0}
             >
-              <DataTable columns={longTermColumns} rows={longTermQuery.data?.data ?? []} rowKey={(r) => r.record_id} />
+              <DataTable columns={fullLongTermColumns} rows={longTermQuery.data?.data ?? []} rowKey={(r) => r.record_id} />
             </StateShell>
           )}
           {lane === "COMMENTARY" && (
@@ -685,7 +591,7 @@ export default function CompensationPage() {
               isEmpty={(commentaryQuery.data?.data.length ?? 0) === 0}
             >
               <DataTable
-                columns={commentaryColumns}
+                columns={fullCommentaryColumns}
                 rows={commentaryQuery.data?.data ?? []}
                 rowKey={(r) => r.creator_id}
               />

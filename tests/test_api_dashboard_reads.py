@@ -515,6 +515,93 @@ def test_invalid_traffic_boost_mode_is_rejected(tmp_path):
     assert response.status_code == 422
 
 
+def test_posts_api_preserves_complete_monthly_detail_fields(tmp_path):
+    database_path = tmp_path / "koc.db"
+    grassroot, _ = _seed_creators(database_path)
+    DashboardRepository(database_path).upsert_posts(
+        pd.DataFrame(
+            [
+                {
+                    "source_file": "complete.xlsx",
+                    "user_id": grassroot.user_id,
+                    "creator_key": grassroot.user_id,
+                    "creator_id": grassroot.id,
+                    "creator_active": True,
+                    "profile_effective_date": "2026-07-01",
+                    "profile_status": "MATCHED",
+                    "matched": True,
+                    "koc_name": grassroot.koc_name,
+                    "creator_label": grassroot.koc_name,
+                    "kol_name": grassroot.koc_name,
+                    "creator_category": "GRASSROOT",
+                    "contract_types": "TT",
+                    "contract_start_date": "2026-05-01",
+                    "contract_end_date": "2026-10-31",
+                    "follower_count": 1200,
+                    "homepage_url": "https://example.com/home",
+                    "youtube_user_id": "ytb-1",
+                    "youtube_homepage_url": "https://youtube.com/@creator",
+                    "youtube_follower_count": 700,
+                    "tiktok_user_id": "tt-1",
+                    "tiktok_homepage_url": "https://tiktok.com/@creator",
+                    "tiktok_follower_count": 500,
+                    "source_platform": "TikTok",
+                    "content_type": "tiktok",
+                    "subtype": "tiktok",
+                    "description": "description value",
+                    "timestamp": "2026-07-10T12:00:00",
+                    "publish_date": "2026-07-10",
+                    "title": "Complete post",
+                    "url": "https://tiktok.example/complete",
+                    "views": 1000,
+                    "view": 1000,
+                    "likes": 20,
+                    "comment": 3,
+                    "reposted": 2,
+                    "collect": 4,
+                    "cross_industry_url_key": "tt:complete",
+                    "is_cross_industry": False,
+                    "compensation_eligible": True,
+                    "cross_industry_reason": None,
+                    "cross_industry_exclusion_id": None,
+                }
+            ]
+        )
+    )
+    client = _authenticated_client(database_path)
+
+    response = client.get(
+        "/api/dashboard/posts",
+        params={"period_mode": "month", "period_month": "2026-07"},
+    )
+
+    assert response.status_code == 200
+    row = response.json()["data"][0]
+    expected = {
+        "source_file",
+        "creator_id",
+        "creator_active",
+        "profile_effective_date",
+        "kol_name",
+        "contract_start_date",
+        "contract_end_date",
+        "follower_count",
+        "homepage_url",
+        "youtube_user_id",
+        "youtube_homepage_url",
+        "youtube_follower_count",
+        "tiktok_user_id",
+        "tiktok_homepage_url",
+        "tiktok_follower_count",
+        "description",
+        "timestamp",
+        "cross_industry_url_key",
+        "cross_industry_exclusion_id",
+    }
+    assert expected <= row.keys()
+    assert row["description"] == "description value"
+
+
 # ---------------------------------------------------------------------------
 # POST /api/dashboard/comparison
 # ---------------------------------------------------------------------------
@@ -610,6 +697,8 @@ def test_comparison_creator_dimension_breakdown_and_warning(tmp_path):
     assert long_breakdown["points"][0]["value"] == 1000
     assert long_breakdown["points"][1]["value"] == 100
     assert long_breakdown["warning"] is True
+    assert long_breakdown["post_count_change_rate"] == 0
+    assert long_breakdown["post_count_warning"] is False
     for key in ("livestream", "shorts", "tiktok"):
         assert key in entry["breakdown"]
 

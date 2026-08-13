@@ -53,9 +53,17 @@ export default function CreatorsPage() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editDraft, setEditDraft] = useState<{
+    user_id: string;
     koc_name: string;
     homepage_url: string;
     follower_count: string;
+    youtube_user_id: string;
+    youtube_homepage_url: string;
+    youtube_follower_count: string;
+    tiktok_user_id: string;
+    tiktok_homepage_url: string;
+    tiktok_follower_count: string;
+    settlement_eligible: boolean;
     note: string;
   } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -162,27 +170,49 @@ export default function CreatorsPage() {
     setActionError(null);
     setEditingId(row.id);
     setEditDraft({
+      user_id: row.user_id,
       koc_name: row.koc_name,
       homepage_url: row.homepage_url ?? "",
       follower_count: row.follower_count != null ? String(row.follower_count) : "",
+      youtube_user_id: row.youtube_user_id ?? "",
+      youtube_homepage_url: row.youtube_homepage_url ?? "",
+      youtube_follower_count:
+        row.youtube_follower_count != null ? String(row.youtube_follower_count) : "",
+      tiktok_user_id: row.tiktok_user_id ?? "",
+      tiktok_homepage_url: row.tiktok_homepage_url ?? "",
+      tiktok_follower_count:
+        row.tiktok_follower_count != null ? String(row.tiktok_follower_count) : "",
+      settlement_eligible: row.settlement_eligible,
       note: row.note ?? "",
     });
   }
 
   function saveEdit(row: Creator) {
     if (!editDraft) return;
+    const numberOrNull = (value: string) => (value === "" ? null : Number(value));
+    const followerFieldsChanged =
+      numberOrNull(editDraft.follower_count) !== row.follower_count ||
+      numberOrNull(editDraft.youtube_follower_count) !== row.youtube_follower_count ||
+      numberOrNull(editDraft.tiktok_follower_count) !== row.tiktok_follower_count;
     updateMutation.mutate({
       id: row.id,
       body: {
-        user_id: row.user_id,
+        user_id: editDraft.user_id,
         koc_name: editDraft.koc_name,
         creator_category: row.creator_category,
         contract_types: row.contract_types,
         homepage_url: editDraft.homepage_url || null,
-        follower_count: editDraft.follower_count === "" ? null : Number(editDraft.follower_count),
+        follower_count: numberOrNull(editDraft.follower_count),
+        youtube_user_id: editDraft.youtube_user_id || null,
+        youtube_homepage_url: editDraft.youtube_homepage_url || null,
+        youtube_follower_count: numberOrNull(editDraft.youtube_follower_count),
+        tiktok_user_id: editDraft.tiktok_user_id || null,
+        tiktok_homepage_url: editDraft.tiktok_homepage_url || null,
+        tiktok_follower_count: numberOrNull(editDraft.tiktok_follower_count),
         active: row.active,
         note: editDraft.note || null,
-        manual_follower_update: true,
+        manual_follower_update: followerFieldsChanged,
+        manual_settlement_eligible: editDraft.settlement_eligible,
       },
       expectedUpdatedAt: row.updated_at,
     });
@@ -204,7 +234,21 @@ export default function CreatorsPage() {
           r.koc_name
         ),
     },
-    { key: "user_id", header: "UID", width: 100, render: (r) => r.user_id },
+    {
+      key: "user_id",
+      header: "UID",
+      width: 110,
+      render: (r) =>
+        editingId === r.id ? (
+          <input
+            style={inputStyle}
+            value={editDraft?.user_id ?? ""}
+            onChange={(e) => setEditDraft((d) => (d ? { ...d, user_id: e.target.value } : d))}
+          />
+        ) : (
+          r.user_id
+        ),
+    },
     {
       key: "creator_category",
       header: "合作类别",
@@ -249,6 +293,83 @@ export default function CreatorsPage() {
         ) : (
           fmtInt(r.follower_count)
         ),
+    },
+    {
+      key: "youtube_user_id",
+      header: "YouTube UID",
+      width: 120,
+      render: (r) =>
+        editingId === r.id ? (
+          <input style={inputStyle} value={editDraft?.youtube_user_id ?? ""} onChange={(e) => setEditDraft((d) => (d ? { ...d, youtube_user_id: e.target.value } : d))} />
+        ) : r.youtube_user_id ?? "-",
+    },
+    {
+      key: "youtube_homepage_url",
+      header: "YouTube主页",
+      width: 180,
+      render: (r) =>
+        editingId === r.id ? (
+          <input style={inputStyle} value={editDraft?.youtube_homepage_url ?? ""} onChange={(e) => setEditDraft((d) => (d ? { ...d, youtube_homepage_url: e.target.value } : d))} />
+        ) : r.youtube_homepage_url ?? "-",
+    },
+    {
+      key: "youtube_follower_count",
+      header: "YouTube粉丝数",
+      width: 120,
+      align: "right",
+      render: (r) =>
+        editingId === r.id ? (
+          <input style={{ ...inputStyle, textAlign: "right" }} type="number" min={0} value={editDraft?.youtube_follower_count ?? ""} onChange={(e) => setEditDraft((d) => (d ? { ...d, youtube_follower_count: e.target.value } : d))} />
+        ) : fmtInt(r.youtube_follower_count),
+    },
+    {
+      key: "tiktok_user_id",
+      header: "TikTok UID",
+      width: 120,
+      render: (r) =>
+        editingId === r.id ? (
+          <input style={inputStyle} value={editDraft?.tiktok_user_id ?? ""} onChange={(e) => setEditDraft((d) => (d ? { ...d, tiktok_user_id: e.target.value } : d))} />
+        ) : r.tiktok_user_id ?? "-",
+    },
+    {
+      key: "tiktok_homepage_url",
+      header: "TikTok主页",
+      width: 180,
+      render: (r) =>
+        editingId === r.id ? (
+          <input style={inputStyle} value={editDraft?.tiktok_homepage_url ?? ""} onChange={(e) => setEditDraft((d) => (d ? { ...d, tiktok_homepage_url: e.target.value } : d))} />
+        ) : r.tiktok_homepage_url ?? "-",
+    },
+    {
+      key: "tiktok_follower_count",
+      header: "TikTok粉丝数",
+      width: 120,
+      align: "right",
+      render: (r) =>
+        editingId === r.id ? (
+          <input style={{ ...inputStyle, textAlign: "right" }} type="number" min={0} value={editDraft?.tiktok_follower_count ?? ""} onChange={(e) => setEditDraft((d) => (d ? { ...d, tiktok_follower_count: e.target.value } : d))} />
+        ) : fmtInt(r.tiktok_follower_count),
+    },
+    {
+      key: "settlement_eligible",
+      header: "粉丝数可结算",
+      width: 110,
+      render: (r) =>
+        editingId === r.id ? (
+          <input type="checkbox" checked={editDraft?.settlement_eligible ?? false} onChange={(e) => setEditDraft((d) => (d ? { ...d, settlement_eligible: e.target.checked } : d))} />
+        ) : r.settlement_eligible ? "是" : "否",
+    },
+    {
+      key: "follower_sync_status",
+      header: "粉丝同步状态",
+      width: 110,
+      render: (r) => r.follower_sync_status,
+    },
+    {
+      key: "contract_period",
+      header: "合同期限",
+      width: 190,
+      render: (r) => `${r.contract_start_date ?? "-"} ~ ${r.contract_end_date ?? "-"}`,
     },
     {
       key: "note",

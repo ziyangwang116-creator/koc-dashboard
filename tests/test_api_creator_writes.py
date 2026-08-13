@@ -173,6 +173,43 @@ def test_update_creator_basic_profile_success(tmp_path):
     assert body["follower_count"] == 2000
 
 
+def test_update_creator_writes_platform_profiles_and_settlement_eligibility(tmp_path):
+    database_path = tmp_path / "koc.db"
+    _, record = _seed_creator(database_path)
+    client = _authenticated_client(database_path)
+
+    response = client.put(
+        f"/api/creators/{record.id}",
+        json={
+            "user_id": record.user_id,
+            "koc_name": record.koc_name,
+            "creator_category": "GRASSROOT",
+            "contract_types": ["TT"],
+            "homepage_url": "https://example.com/creator",
+            "follower_count": 3200,
+            "youtube_user_id": f"{PREFIX}ytb-platform",
+            "youtube_homepage_url": "https://youtube.com/@platform",
+            "youtube_follower_count": 2100,
+            "tiktok_user_id": f"{PREFIX}tt-platform",
+            "tiktok_homepage_url": "https://tiktok.com/@platform",
+            "tiktok_follower_count": 1100,
+            "active": True,
+            "manual_follower_update": True,
+            "manual_settlement_eligible": True,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["youtube_user_id"] == f"{PREFIX}ytb-platform"
+    assert body["youtube_homepage_url"] == "https://youtube.com/@platform"
+    assert body["youtube_follower_count"] == 2100
+    assert body["tiktok_user_id"] == f"{PREFIX}tt-platform"
+    assert body["tiktok_homepage_url"] == "https://tiktok.com/@platform"
+    assert body["tiktok_follower_count"] == 1100
+    assert body["settlement_eligible"] is True
+
+
 def test_update_creator_not_found_returns_404(tmp_path):
     database_path = tmp_path / "koc.db"
     KOCRepository(database_path)

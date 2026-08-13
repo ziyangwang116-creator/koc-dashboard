@@ -206,14 +206,32 @@ def _date_str(value):
 
 def _serialize_post_row(row: pd.Series) -> dict:
     return {
+        "source_file": _none_if_na(row.get("source_file")),
         "creator_key": row.get("creator_key"),
         "user_id": row.get("user_id"),
+        "creator_id": _none_if_na(row.get("creator_id")),
+        "creator_active": bool(row.get("creator_active")),
+        "profile_effective_date": _date_str(row.get("profile_effective_date")),
         "koc_name": row.get("koc_name"),
+        "creator_label": _none_if_na(row.get("creator_label")),
+        "kol_name": _none_if_na(row.get("kol_name")),
         "creator_category": row.get("_creator_category_value"),
         "contract_types": split_contract_types(row.get("contract_types")),
+        "contract_start_date": _date_str(row.get("contract_start_date")),
+        "contract_end_date": _date_str(row.get("contract_end_date")),
+        "follower_count": _none_if_na(row.get("follower_count")),
+        "homepage_url": _none_if_na(row.get("homepage_url")),
+        "youtube_user_id": _none_if_na(row.get("youtube_user_id")),
+        "youtube_homepage_url": _none_if_na(row.get("youtube_homepage_url")),
+        "youtube_follower_count": _none_if_na(row.get("youtube_follower_count")),
+        "tiktok_user_id": _none_if_na(row.get("tiktok_user_id")),
+        "tiktok_homepage_url": _none_if_na(row.get("tiktok_homepage_url")),
+        "tiktok_follower_count": _none_if_na(row.get("tiktok_follower_count")),
         "source_platform": row.get("source_platform"),
         "content_type": row.get("content_type"),
         "subtype": row.get("subtype"),
+        "description": _none_if_na(row.get("description")),
+        "timestamp": _none_if_na(row.get("timestamp")),
         "title": row.get("title"),
         "url": row.get("url"),
         "publish_date": _date_str(row.get("publish_date")),
@@ -226,11 +244,15 @@ def _serialize_post_row(row: pd.Series) -> dict:
         "comment": _none_if_na(row.get("comment")),
         "reposted": _none_if_na(row.get("reposted")),
         "collect": _none_if_na(row.get("collect")),
+        "cross_industry_url_key": _none_if_na(row.get("cross_industry_url_key")),
         "matched": bool(row.get("matched")),
         "profile_status": row.get("profile_status"),
         "is_cross_industry": bool(row.get("is_cross_industry")),
         "compensation_eligible": bool(row.get("compensation_eligible")),
         "cross_industry_reason": row.get("cross_industry_reason") or None,
+        "cross_industry_exclusion_id": _none_if_na(
+            row.get("cross_industry_exclusion_id")
+        ),
     }
 
 
@@ -340,7 +362,17 @@ def _creator_breakdown_points(period_frames: list[pd.DataFrame], creator_key: st
             views = int(pd.to_numeric(subset.get("views"), errors="coerce").fillna(0).sum())
             points.append({"period_label": label, "value": views, "post_count": int(len(subset))})
         rate, warning = _change_rate(points)
-        breakdown[key] = {"points": points, "change_rate": rate, "warning": warning}
+        post_count_points = [
+            {**point, "value": point["post_count"]} for point in points
+        ]
+        post_count_rate, post_count_warning = _change_rate(post_count_points)
+        breakdown[key] = {
+            "points": points,
+            "change_rate": rate,
+            "warning": warning,
+            "post_count_change_rate": post_count_rate,
+            "post_count_warning": post_count_warning,
+        }
     return breakdown
 
 
