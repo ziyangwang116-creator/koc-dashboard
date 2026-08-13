@@ -6,7 +6,7 @@ import { AppShell } from "@/components/AppShell";
 import { DataTable, type Column } from "@/components/DataTable";
 import { StateShell } from "@/components/DataStates";
 import { creatorsApi, metaApi, followersApi } from "@/lib/endpoints";
-import { fmtInt } from "@/lib/format";
+import { creatorCategoryLabel, fmtInt } from "@/lib/format";
 import type {
   Creator,
   ContractPeriod,
@@ -209,7 +209,7 @@ export default function CreatorsPage() {
       key: "creator_category",
       header: "合作类别",
       width: 100,
-      render: (r) => r.creator_category ?? "—",
+      render: (r) => creatorCategoryLabel(r.creator_category),
     },
     {
       key: "contract_types",
@@ -338,9 +338,9 @@ export default function CreatorsPage() {
             style={selectStyle}
           >
             <option value="">全部合作类别</option>
-            <option value="LONG_TERM">LONG_TERM</option>
-            <option value="COMMENTARY">COMMENTARY</option>
-            <option value="GRASSROOT">GRASSROOT</option>
+            <option value="LONG_TERM">长包</option>
+            <option value="COMMENTARY">解说</option>
+            <option value="GRASSROOT">草根</option>
           </select>
           <select
             value={contractType}
@@ -616,7 +616,7 @@ function CreatorDetailPanel({
         {detail && (
           <div style={{ fontSize: 13, display: "flex", flexDirection: "column", gap: 12 }}>
             <div>
-              {detail.koc_name}（{detail.user_id}）· {detail.creator_category ?? "—"}
+              {detail.koc_name}（{detail.user_id}）· {creatorCategoryLabel(detail.creator_category)}
             </div>
 
             <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>

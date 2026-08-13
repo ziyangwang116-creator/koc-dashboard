@@ -201,6 +201,7 @@ describe("CreatorsPage", () => {
     renderWithQueryClient(<CreatorsPage />);
     await waitFor(() => expect(screen.getByText("示例达人")).toBeInTheDocument());
     expect(screen.getByPlaceholderText("搜索达人名称 / UID")).toBeInTheDocument();
+    expect(screen.getAllByText("草根").length).toBeGreaterThan(0);
   });
 
   it("saves an inline profile edit via PUT and refetches the list", async () => {

@@ -7,7 +7,7 @@ import { DataTable, type Column } from "@/components/DataTable";
 import { StateShell } from "@/components/DataStates";
 import { dashboardApi } from "@/lib/endpoints";
 import { ApiError } from "@/lib/api-client";
-import { fmtInt, fmtPercent, isDrop30 } from "@/lib/format";
+import { creatorCategoryLabel, fmtInt, fmtPercent, isDrop30 } from "@/lib/format";
 import type { DashboardPostRow, DashboardSummaryRow, RankingCreatorItem, RankingVideoItem } from "@/lib/types";
 import {
   LineChart,
@@ -122,7 +122,7 @@ export default function DashboardPage() {
 
   const summaryColumns: Column<DashboardSummaryRow>[] = [
     { key: "creator_label", header: "达人", render: (r) => r.creator_label },
-    { key: "creator_category", header: "分类", render: (r) => r.creator_category ?? "—" },
+    { key: "creator_category", header: "合作类别", render: (r) => creatorCategoryLabel(r.creator_category) },
     { key: "post_count", header: "投稿数", align: "right", render: (r) => fmtInt(r.post_count) },
     { key: "total_views", header: "播放量", align: "right", render: (r) => fmtInt(r.total_views) },
     {
@@ -214,7 +214,7 @@ export default function DashboardPage() {
             <option value="">全部合作类别</option>
             {(options?.creator_categories ?? []).map((c) => (
               <option key={c} value={c}>
-                {c}
+                {creatorCategoryLabel(c)}
               </option>
             ))}
           </select>
@@ -224,7 +224,7 @@ export default function DashboardPage() {
               checked={includeCrossIndustry}
               onChange={(e) => setIncludeCrossIndustry(e.target.checked)}
             />
-            含跨行业数据
+            包含异业活动数据
           </label>
         </div>
 
