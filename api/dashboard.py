@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import timedelta
 from typing import Callable
 
@@ -15,6 +16,7 @@ from core.dashboard_processor import (
     enrich_dashboard_creator_metadata,
 )
 from database.dashboard_repository import DashboardRepository
+from database.cache_token import DatabaseCacheToken, dashboard_cache_token
 from database.db import connect, init_db
 from database.koc_repository import KOCRepository
 from ui.dashboard import (
@@ -56,20 +58,41 @@ CREATOR_BREAKDOWN_TYPES = (
     ("tiktok", "tiktok"),
 )
 
+_PREPARED_DATA_LOCK = threading.RLock()
+_PREPARED_DATA_CACHE: dict[
+    tuple[str, DatabaseCacheToken], tuple[pd.DataFrame, list]
+] = {}
 
-def _load_enriched_posts(database_path) -> pd.DataFrame:
-    dashboard_repository = DashboardRepository(database_path)
-    creator_repository = KOCRepository(database_path)
-    creator_records = creator_repository.list(include_inactive=True)
-    profile_history = creator_repository.list_profile_history()
 
-    loaded = build_dashboard_result(dashboard_repository.load_posts())
-    enriched = enrich_dashboard_creator_metadata(loaded.data, creator_records, profile_history)
-    result = build_dashboard_result(
-        dashboard_repository.annotate_cross_industry_posts(enriched),
-        loaded.file_reports,
-    )
-    return result.data, creator_records
+def _load_enriched_posts(database_path) -> tuple[pd.DataFrame, list]:
+    # A dashboard page issues several heavy reads in parallel. Build the shared
+    # enriched frame once per database revision instead of re-reading and
+    # normalizing every persisted post for each endpoint.
+    target = str(database_path)
+    token = dashboard_cache_token(database_path)
+    cache_key = (target, token)
+    with _PREPARED_DATA_LOCK:
+        cached = _PREPARED_DATA_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
+        dashboard_repository = DashboardRepository(database_path)
+        creator_repository = KOCRepository(database_path)
+        creator_records = creator_repository.list(include_inactive=True)
+        profile_history = creator_repository.list_profile_history()
+
+        loaded = build_dashboard_result(dashboard_repository.load_posts())
+        enriched = enrich_dashboard_creator_metadata(
+            loaded.data, creator_records, profile_history
+        )
+        result = build_dashboard_result(
+            dashboard_repository.annotate_cross_industry_posts(enriched),
+            loaded.file_reports,
+        )
+        prepared = (result.data, creator_records)
+        _PREPARED_DATA_CACHE.clear()
+        _PREPARED_DATA_CACHE[cache_key] = prepared
+        return prepared
 
 
 def _unique_in_order(values) -> list[str]:

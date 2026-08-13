@@ -53,7 +53,8 @@ async function request<T>(
   } = {}
 ): Promise<T> {
   const { method = "GET", params, body, headers } = options;
-  const res = await fetch(buildUrl(path, params), {
+  const url = buildUrl(path, params);
+  const requestInit: RequestInit = {
     method,
     credentials: "include",
     headers: {
@@ -61,20 +62,46 @@ async function request<T>(
       ...headers,
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+  };
+
+  let res: Response;
+  let json: unknown;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      res = await fetch(url, requestInit);
+    } catch {
+      if (method === "GET" && attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        continue;
+      }
+      throw new ApiError(0, {
+        code: "NETWORK_ERROR",
+        message: "网络连接暂时不可用，请稍后重试。",
+      });
+    }
+
+    try {
+      json = await res.json();
+    } catch {
+      if (method === "GET" && attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        continue;
+      }
+      throw new ApiError(res.status, {
+        code: "INTERNAL_ERROR",
+        message: "服务器返回了无法解析的响应。",
+      });
+    }
+
+    if (method === "GET" && attempt === 0 && [502, 503, 504].includes(res.status)) {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      continue;
+    }
+    break;
+  }
 
   if (res.status === 401) {
     unauthorizedHandler?.();
-  }
-
-  let json: unknown;
-  try {
-    json = await res.json();
-  } catch {
-    throw new ApiError(res.status, {
-      code: "INTERNAL_ERROR",
-      message: "服务器返回了无法解析的响应。",
-    });
   }
 
   if (!res.ok) {

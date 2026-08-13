@@ -38,8 +38,10 @@ export default function DashboardPage() {
   });
 
   const options = filterOptionsQuery.data?.data;
-  const effectiveMonth = periodMonth || options?.available_months?.[0] || "";
-  const effectiveWeekStart = weekStart || options?.available_weeks?.[0]?.week_start || "";
+  const availableMonths = options?.available_months ?? [];
+  const availableWeeks = options?.available_weeks ?? [];
+  const effectiveMonth = periodMonth || availableMonths.at(-1) || "";
+  const effectiveWeekStart = weekStart || availableWeeks.at(-1)?.week_start || "";
 
   const periodParams = useMemo(() => {
     if (periodMode === "month") return { period_mode: "month", period_month: effectiveMonth };

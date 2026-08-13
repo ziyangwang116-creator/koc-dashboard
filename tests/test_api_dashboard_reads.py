@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+from unittest.mock import patch
 
 from api.main import create_app
 from config.settings import Settings
@@ -31,6 +32,27 @@ def _authenticated_client(database_path):
     login_response = client.post("/api/auth/login", json={"password": TEAM_PASSWORD})
     assert login_response.status_code == 200
     return client
+
+
+def test_dashboard_reads_reuse_prepared_data_until_database_changes(tmp_path):
+    database_path = tmp_path / "koc.db"
+    grassroot, long_term = _seed_creators(database_path)
+    _seed_posts(database_path, grassroot, long_term)
+    client = _authenticated_client(database_path)
+
+    with patch(
+        "api.dashboard.build_dashboard_result",
+        wraps=__import__("api.dashboard", fromlist=["build_dashboard_result"]).build_dashboard_result,
+    ) as build_result:
+        first = client.get("/api/dashboard/filter-options")
+        second = client.get(
+            "/api/dashboard/summary",
+            params={"period_mode": "month", "period_month": "2026-07"},
+        )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert build_result.call_count == 2
 
 
 def _seed_creators(database_path):

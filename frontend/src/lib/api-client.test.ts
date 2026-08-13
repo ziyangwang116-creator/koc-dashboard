@@ -67,6 +67,44 @@ describe("apiClient", () => {
     global.fetch = mockFetch as unknown as typeof fetch;
 
     await expect(apiClient.get("/dashboard/summary")).rejects.toBeInstanceOf(ApiError);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries a transient non-JSON GET response once", async () => {
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        json: async () => {
+          throw new Error("gateway html");
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: ["ok"] }),
+      });
+    global.fetch = mockFetch as unknown as typeof fetch;
+
+    const result = await apiClient.get<{ data: string[] }>("/dashboard/summary");
+
+    expect(result.data).toEqual(["ok"]);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("never retries a write request", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 502,
+      json: async () => {
+        throw new Error("gateway html");
+      },
+    });
+    global.fetch = mockFetch as unknown as typeof fetch;
+
+    await expect(apiClient.post("/imports/confirm", {})).rejects.toBeInstanceOf(ApiError);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
   it("invokes the registered unauthorized handler on 401", async () => {
