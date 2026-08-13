@@ -2,11 +2,17 @@
 
 import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Download, FileSpreadsheet } from "lucide-react";
 import { AppShell } from "@/components/AppShell";
 import { DataTable, type Column } from "@/components/DataTable";
 import { StateShell } from "@/components/DataStates";
 import { importsApi, dashboardApi } from "@/lib/endpoints";
-import type { ImportBatch, ImportPreview, CrossIndustryExclusion } from "@/lib/types";
+import type {
+  ImportBatch,
+  ImportPreview,
+  CrossIndustryExclusion,
+  StandardizationResult,
+} from "@/lib/types";
 import { ApiError } from "@/lib/api-client";
 
 /**
@@ -168,8 +174,10 @@ export default function ImportsPage() {
   return (
     <AppShell>
       <section style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+        <StandardizationPanel />
+
         <div style={panelStyle}>
-          <h3 style={{ marginTop: 0 }}>数据导入</h3>
+          <h3 style={{ marginTop: 0 }}>导入看板数据库</h3>
           <p style={{ color: "var(--color-text-muted)", fontSize: 12.5 }}>
             上传 Rapid Query 导出的 Excel 文件，系统会先生成预览（新增/更新/删除/未匹配达人/日期异常），
             确认后才会按月完整替换并写入数据库；替换前会自动保存快照，可在下方「导入历史」中回滚。
@@ -177,8 +185,9 @@ export default function ImportsPage() {
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <input
               ref={fileInputRef}
+              aria-label="导入看板数据库文件"
               type="file"
-              accept=".xlsx,.xls"
+              accept=".xlsx"
               multiple
               onChange={(e) => setSelectedFiles(Array.from(e.target.files ?? []))}
             />
@@ -472,6 +481,219 @@ export default function ImportsPage() {
   );
 }
 
+function StandardizationPanel() {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [files, setFiles] = useState<File[]>([]);
+  const [processingTimezone, setProcessingTimezone] = useState("Asia/Shanghai");
+  const [deduplicateUrls, setDeduplicateUrls] = useState(false);
+  const [result, setResult] = useState<StandardizationResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const mutation = useMutation({
+    mutationFn: () => importsApi.standardize(files, processingTimezone, deduplicateUrls),
+    onSuccess: (response) => {
+      setError(null);
+      setResult(response.data);
+    },
+    onError: (err) => {
+      setError(errorMessageOf(err));
+      setResult(null);
+    },
+  });
+
+  const fileReportColumns: Column<Record<string, unknown>>[] = [
+    { key: "source_file", header: "文件名", width: 180, render: (r) => String(r.source_file ?? "—") },
+    { key: "original_rows", header: "原始行数", align: "right", render: (r) => String(r.original_rows ?? 0) },
+    { key: "processed_rows", header: "处理行数", align: "right", render: (r) => String(r.processed_rows ?? 0) },
+    { key: "unmatched_uid", header: "未匹配 UID", align: "right", render: (r) => String(r.unmatched_uid ?? 0) },
+    { key: "duplicate_url", header: "重复记录", align: "right", render: (r) => String(r.duplicate_url ?? 0) },
+    { key: "status", header: "状态", width: 80, render: (r) => String(r.status ?? "—") },
+    { key: "error_message", header: "错误信息", width: 260, render: (r) => String(r.error_message ?? "—") },
+  ];
+  const unmatchedColumns: Column<Record<string, unknown>>[] = [
+    { key: "userId", header: "UID", width: 150, render: (r) => String(r.userId ?? "—") },
+    { key: "出现次数", header: "出现次数", align: "right", render: (r) => String(r["出现次数"] ?? 0) },
+    { key: "来源文件", header: "来源文件", width: 240, render: (r) => String(r["来源文件"] ?? "—") },
+  ];
+  const resultColumns: Column<Record<string, unknown>>[] = [
+    { key: "koc_name", header: "达人", width: 140, render: (r) => String(r.koc_name ?? "—") },
+    { key: "platform", header: "平台/类型", width: 110, render: (r) => String(r.platform ?? "—") },
+    { key: "publish_date", header: "发布日期", width: 110, render: (r) => String(r.publish_date ?? "—") },
+    { key: "title", header: "标题", width: 240, render: (r) => String(r.title ?? "—") },
+    { key: "url", header: "链接", width: 300, render: (r) => String(r.url ?? "—") },
+    { key: "views", header: "播放量", align: "right", render: (r) => String(r.views ?? "—") },
+    { key: "likes", header: "点赞", align: "right", render: (r) => String(r.likes ?? "—") },
+    { key: "comment", header: "评论", align: "right", render: (r) => String(r.comment ?? "—") },
+    { key: "reposted", header: "转发", align: "right", render: (r) => String(r.reposted ?? "—") },
+  ];
+  const exceptionColumns: Column<Record<string, unknown>>[] = [
+    { key: "issue_type", header: "异常类型", width: 150, render: (r) => String(r.issue_type ?? "—") },
+    { key: "source_file", header: "来源文件", width: 180, render: (r) => String(r.source_file ?? "—") },
+    { key: "userId", header: "UID", width: 140, render: (r) => String(r.userId ?? "—") },
+    { key: "koc_name", header: "达人", width: 130, render: (r) => String(r.koc_name ?? "—") },
+    { key: "title", header: "标题", width: 220, render: (r) => String(r.title ?? "—") },
+    { key: "url", header: "链接", width: 260, render: (r) => String(r.url ?? "—") },
+    { key: "detail", header: "说明", width: 260, render: (r) => String(r.detail ?? "—") },
+  ];
+
+  const metrics = result
+    ? [
+        ["上传文件", result.overall.uploaded_files],
+        ["成功文件", result.overall.successful_files],
+        ["失败文件", result.overall.failed_files],
+        ["原始总行数", result.overall.original_rows],
+        ["整理后行数", result.overall.merged_rows],
+        ["不同达人", result.overall.koc_count],
+        ["未匹配 UID", result.overall.unmatched_uid_count],
+        ["重复记录涉及行数", result.overall.duplicate_url_count],
+        ["实际移除重复 URL", result.overall.removed_duplicate_count],
+        ["缺失 URL", result.overall.missing_url_count],
+        ["缺失标题", result.overall.missing_title_count],
+        ["无效日期", result.overall.invalid_timestamp_count],
+        ["最早日期", result.overall.earliest_date ?? "—"],
+        ["最晚日期", result.overall.latest_date ?? "—"],
+      ]
+    : [];
+
+  return (
+    <div style={{ ...panelStyle, borderTop: "3px solid var(--color-primary)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <FileSpreadsheet size={20} color="var(--color-primary-dark)" />
+        <h3 style={{ margin: 0 }}>标准化整理与下载</h3>
+        <span style={readOnlyBadge}>不写入数据库</span>
+      </div>
+      <p style={{ color: "var(--color-text-muted)", fontSize: 12.5, marginTop: 8 }}>
+        上传一个或多个 Rapid Query xlsx 文件，按照原版规则统一字段、匹配达人库、合并数据并生成标准 Excel。
+        下载文件包含「整理结果」「文件处理报告」「异常数据」三个工作表。
+      </p>
+
+      <div style={standardizeControls}>
+        <input
+          ref={fileInputRef}
+          aria-label="标准化整理文件"
+          type="file"
+          accept=".xlsx"
+          multiple
+          onChange={(event) => {
+            setFiles(Array.from(event.target.files ?? []));
+            setResult(null);
+            setError(null);
+          }}
+        />
+        <label style={fieldLabel}>
+          时间戳时区
+          <input
+            aria-label="时间戳时区"
+            style={{ ...inputStyle, marginTop: 0, minWidth: 170 }}
+            value={processingTimezone}
+            onChange={(event) => setProcessingTimezone(event.target.value)}
+          />
+        </label>
+        <label style={{ ...fieldLabel, flexDirection: "row" }}>
+          <input
+            type="checkbox"
+            checked={deduplicateUrls}
+            onChange={(event) => setDeduplicateUrls(event.target.checked)}
+          />
+          导出时去除完全重复的 URL
+        </label>
+        <button
+          type="button"
+          style={files.length === 0 || mutation.isPending ? disabledBtn : primaryBtn}
+          disabled={files.length === 0 || mutation.isPending}
+          onClick={() => mutation.mutate()}
+        >
+          {mutation.isPending ? "整理中…" : "开始整理"}
+        </button>
+      </div>
+
+      {files.length > 0 && (
+        <div style={fileListStyle}>
+          {files.map((file) => (
+            <span key={`${file.name}-${file.size}`}>{file.name}（{Math.max(1, Math.round(file.size / 1024))} KB）</span>
+          ))}
+        </div>
+      )}
+      {deduplicateUrls && (
+        <div style={infoStyle}>按 platform + url 去重，保留上传顺序中第一次出现的记录；空 URL 不删除。</div>
+      )}
+      {error && <div style={alertStyle} role="alert">{error}</div>}
+
+      {result && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 16, marginTop: 18 }}>
+          <div className="metric-row">
+            {metrics.map(([label, value]) => (
+              <div className="metric-card" style={processingMetric} key={String(label)}>
+                <div style={{ color: "var(--color-text-muted)", fontSize: 12 }}>{label}</div>
+                <strong style={{ display: "block", fontSize: 18, marginTop: 4 }}>{String(value)}</strong>
+              </div>
+            ))}
+          </div>
+
+          {result.overall.removed_duplicate_count > 0 && (
+            <div style={warningStyle}>
+              已从导出明细移除 {result.overall.removed_duplicate_count} 条重复 URL；异常表仍保留重复记录信息。
+            </div>
+          )}
+
+          <ResultSection title="逐文件处理报告" count={result.file_reports.length} rows={result.file_reports} columns={fileReportColumns} defaultOpen />
+          <ResultSection title="未匹配 UID" count={result.unmatched_uids.length} rows={result.unmatched_uids} columns={unmatchedColumns} tone={result.unmatched_uids.length ? "warning" : undefined} />
+          <ResultSection title="整理结果预览（前 100 条）" count={result.result_row_count} rows={result.result_preview} columns={resultColumns} defaultOpen />
+          <ResultSection title="异常数据预览（前 200 条）" count={result.exception_row_count} rows={result.exception_preview} columns={exceptionColumns} tone={result.exception_row_count ? "warning" : undefined} />
+
+          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <a href={result.download_path} download={result.filename} style={downloadBtn}>
+              <Download size={16} />
+              下载统一标准 Excel
+            </a>
+            <span style={{ color: "var(--color-text-muted)", fontSize: 12 }}>
+              下载结果临时保留 {Math.round(result.expires_in_seconds / 60)} 分钟
+            </span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ResultSection({
+  title,
+  count,
+  rows,
+  columns,
+  tone,
+  defaultOpen = false,
+}: {
+  title: string;
+  count: number;
+  rows: Record<string, unknown>[];
+  columns: Column<Record<string, unknown>>[];
+  tone?: "warning";
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div>
+      <button type="button" style={sectionToggle} onClick={() => setOpen((value) => !value)}>
+        <strong>{title}</strong>
+        <span style={tone === "warning" && count ? warningBadge : countBadge}>{count}</span>
+        <span>{open ? "收起" : "展开"}</span>
+      </button>
+      {open && (
+        <div style={{ marginTop: 8 }}>
+          <StateShell isLoading={false} isError={false} isEmpty={rows.length === 0} emptyLabel="无">
+            <DataTable
+              columns={columns}
+              rows={rows.map((row, index) => ({ ...row, __row_index: index }))}
+              rowKey={(row) => row.__row_index as number}
+            />
+          </StateShell>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DiffSection({
   title,
   bucket,
@@ -621,4 +843,87 @@ const modalBox: React.CSSProperties = {
   width: 460,
   maxWidth: "90vw",
   boxShadow: "0 8px 30px rgba(0,0,0,0.2)",
+};
+
+const standardizeControls: React.CSSProperties = {
+  display: "flex",
+  gap: 12,
+  alignItems: "center",
+  flexWrap: "wrap",
+  marginTop: 14,
+};
+
+const fieldLabel: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+  alignItems: "center",
+  fontSize: 12.5,
+};
+
+const readOnlyBadge: React.CSSProperties = {
+  background: "var(--color-primary-bg)",
+  color: "var(--color-primary-dark)",
+  borderRadius: 999,
+  padding: "2px 8px",
+  fontSize: 11.5,
+  fontWeight: 600,
+};
+
+const fileListStyle: React.CSSProperties = {
+  display: "flex",
+  gap: "6px 14px",
+  flexWrap: "wrap",
+  marginTop: 10,
+  color: "var(--color-text-muted)",
+  fontSize: 12,
+};
+
+const infoStyle: React.CSSProperties = {
+  background: "var(--color-primary-bg)",
+  color: "var(--color-primary-dark)",
+  borderRadius: "var(--radius)",
+  padding: "8px 10px",
+  fontSize: 12.5,
+  marginTop: 10,
+};
+
+const warningStyle: React.CSSProperties = {
+  background: "var(--color-warning-bg)",
+  color: "var(--color-warning)",
+  border: "1px solid var(--color-warning)",
+  borderRadius: "var(--radius)",
+  padding: "8px 12px",
+  fontSize: 12.5,
+};
+
+const warningBadge: React.CSSProperties = {
+  ...countBadge,
+  background: "var(--color-warning-bg)",
+  color: "var(--color-warning)",
+};
+
+const sectionToggle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  background: "none",
+  border: 0,
+  color: "var(--color-primary-dark)",
+  padding: 0,
+};
+
+const processingMetric: React.CSSProperties = {
+  background: "var(--color-bg)",
+  border: "1px solid var(--color-border)",
+  borderRadius: "var(--radius)",
+  padding: 10,
+};
+
+const downloadBtn: React.CSSProperties = {
+  ...primaryBtn,
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 7,
+  textDecoration: "none",
 };

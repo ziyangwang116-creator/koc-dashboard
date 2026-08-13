@@ -251,6 +251,40 @@ export interface ImportPreview {
   date_anomalies: ImportDiffBucket;
 }
 
+export interface StandardizationOverall {
+  uploaded_files: number;
+  successful_files: number;
+  failed_files: number;
+  original_rows: number;
+  merged_rows: number;
+  koc_count: number;
+  earliest_date: string | null;
+  latest_date: string | null;
+  unmatched_uid_count: number;
+  duplicate_url_count: number;
+  missing_url_count: number;
+  missing_title_count: number;
+  invalid_timestamp_count: number;
+  blank_subtype_to_shorts_count: number;
+  removed_duplicate_count: number;
+}
+
+export interface StandardizationResult {
+  download_token: string;
+  download_path: string;
+  filename: string;
+  expires_in_seconds: number;
+  timezone: string;
+  deduplicate_urls: boolean;
+  overall: StandardizationOverall;
+  file_reports: Record<string, unknown>[];
+  unmatched_uids: Record<string, unknown>[];
+  result_preview: Record<string, unknown>[];
+  result_row_count: number;
+  exception_preview: Record<string, unknown>[];
+  exception_row_count: number;
+}
+
 export interface CrossIndustryExclusion {
   id: number;
   platform: string;

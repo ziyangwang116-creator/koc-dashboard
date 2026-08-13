@@ -12,6 +12,7 @@ import type {
   RankingVideoItem,
   ImportBatch,
   ImportPreview,
+  StandardizationResult,
   CrossIndustryExclusion,
   ListMeta,
   CompensationPeriod,
@@ -238,6 +239,11 @@ export const followersApi = {
 };
 
 export const importsApi = {
+  standardize: (files: File[], processingTimezone: string, deduplicateUrls: boolean) =>
+    uploadMultipart<{ data: StandardizationResult }>("/imports/standardize", files, "files", {
+      processing_timezone: processingTimezone,
+      deduplicate_urls: deduplicateUrls,
+    }),
   preview: (files: File[]) => uploadMultipart<{ data: ImportPreview }>("/imports/preview", files),
   confirm: (previewToken: string, body: Record<string, unknown>, options?: WriteOptions) =>
     apiClient.post<{

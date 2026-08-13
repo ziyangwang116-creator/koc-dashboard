@@ -13,16 +13,22 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from typing import Any, Callable
+from urllib.parse import quote
 
 import pandas as pd
-from fastapi import APIRouter, Body, File, Header, HTTPException, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Body, File, Form, Header, HTTPException, UploadFile
+from fastapi.responses import JSONResponse, Response
 
 from core.file_processor import UploadedExcel
 from core.multi_file_processor import MultiFileProcessor
 from database.dashboard_repository import DashboardRepository
+from exporters.excel_exporter import (
+    build_multi_file_download_filename,
+    export_multi_file_excel,
+)
 
 from api.idempotency import IdempotencyCache
 
@@ -96,6 +102,39 @@ class PreviewStore:
         return entry
 
 
+@dataclass
+class _StandardizeEntry:
+    excel_bytes: bytes
+    filename: str
+    expires_at: float
+
+
+class StandardizeStore:
+    """Short-lived download storage for read-only standardization results."""
+
+    def __init__(self, ttl_seconds: int = PREVIEW_TTL_SECONDS) -> None:
+        self.ttl_seconds = ttl_seconds
+        self._entries: dict[str, _StandardizeEntry] = {}
+
+    def create(self, *, excel_bytes: bytes, filename: str) -> str:
+        token = uuid.uuid4().hex
+        self._entries[token] = _StandardizeEntry(
+            excel_bytes=excel_bytes,
+            filename=filename,
+            expires_at=time.time() + self.ttl_seconds,
+        )
+        return token
+
+    def get(self, token: str) -> _StandardizeEntry | None:
+        entry = self._entries.get(token)
+        if entry is None:
+            return None
+        if time.time() >= entry.expires_at:
+            del self._entries[token]
+            return None
+        return entry
+
+
 def build_imports_router(
     *,
     database_path,
@@ -105,6 +144,7 @@ def build_imports_router(
 ) -> APIRouter:
     router = APIRouter(dependencies=[require_session])
     preview_store = PreviewStore()
+    standardize_store = StandardizeStore()
     idempotency_cache = IdempotencyCache()
     # Simple in-process guard against two concurrent replace_months confirms
     # for overlapping months racing each other (19.2.2 "并发冲突").
@@ -113,19 +153,85 @@ def build_imports_router(
     def _repository() -> DashboardRepository:
         return DashboardRepository(database_path)
 
-    @router.post("/api/imports/preview")
-    async def preview_import(
-        files: list[UploadFile] = File(...),
-    ) -> dict:
+    async def _uploaded_excels(files: list[UploadFile]) -> list[UploadedExcel]:
         if not files:
             raise _validation_error("请至少上传一个 Excel 文件。", "files")
         uploaded: list[UploadedExcel] = []
         for upload in files:
             name = upload.filename or "未命名文件"
-            if not name.lower().endswith((".xlsx", ".xls")):
-                raise _validation_error(f"仅支持 .xlsx/.xls 文件：{name}", "files")
+            if not name.lower().endswith(".xlsx"):
+                raise _validation_error(f"仅支持 .xlsx 文件：{name}", "files")
             content = await upload.read()
             uploaded.append(UploadedExcel(name=name, content=content))
+        return uploaded
+
+    @router.post("/api/imports/standardize")
+    async def standardize_files(
+        files: list[UploadFile] = File(...),
+        processing_timezone: str | None = Form(default=None),
+        deduplicate_urls: bool = Form(default=False),
+    ) -> dict:
+        """Run the legacy Rapid Query standardizer without writing business data."""
+        uploaded = await _uploaded_excels(files)
+        effective_timezone = (processing_timezone or timezone).strip()
+        try:
+            result = MultiFileProcessor(database_path, effective_timezone).process(
+                uploaded,
+                deduplicate_urls=deduplicate_urls,
+            )
+            excel_bytes = export_multi_file_excel(
+                result.data,
+                result.file_reports,
+                result.exceptions,
+            )
+        except Exception as exc:  # noqa: BLE001 - user-facing processing error
+            raise _validation_error(f"整理任务无法完成：{exc}") from exc
+
+        filename = build_multi_file_download_filename(datetime.now())
+        token = standardize_store.create(excel_bytes=excel_bytes, filename=filename)
+        return _json_safe(
+            {
+                "data": {
+                    "download_token": token,
+                    "download_path": f"/api/imports/standardize/{token}/download",
+                    "filename": filename,
+                    "expires_in_seconds": standardize_store.ttl_seconds,
+                    "timezone": effective_timezone,
+                    "deduplicate_urls": deduplicate_urls,
+                    "overall": asdict(result.overall),
+                    "file_reports": result.file_reports.to_dict("records"),
+                    "unmatched_uids": result.unmatched_uids.to_dict("records"),
+                    "result_preview": result.data.head(100).to_dict("records"),
+                    "result_row_count": len(result.data),
+                    "exception_preview": result.exceptions.head(200).to_dict("records"),
+                    "exception_row_count": len(result.exceptions),
+                }
+            }
+        )
+
+    @router.get("/api/imports/standardize/{download_token}/download")
+    def download_standardized_file(download_token: str) -> Response:
+        entry = standardize_store.get(download_token)
+        if entry is None:
+            raise _not_found_error("整理结果已过期，请重新上传并整理。")
+        encoded_filename = quote(entry.filename)
+        return Response(
+            content=entry.excel_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": (
+                    'attachment; filename="koc-standardized.xlsx"; '
+                    f"filename*=UTF-8''{encoded_filename}"
+                ),
+                "Cache-Control": "no-store",
+            },
+        )
+
+    @router.post("/api/imports/preview")
+    async def preview_import(
+        files: list[UploadFile] = File(...),
+    ) -> dict:
+        uploaded = await _uploaded_excels(files)
 
         try:
             result = MultiFileProcessor(database_path, timezone).process(uploaded)

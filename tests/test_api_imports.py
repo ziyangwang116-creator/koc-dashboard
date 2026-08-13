@@ -5,6 +5,7 @@ import io
 
 import pandas as pd
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
 
 from api.main import create_app
 from config.settings import Settings
@@ -84,6 +85,50 @@ def _upload_preview(client, rows):
         files={"files": ("data.xlsx", content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
     )
     return response
+
+
+def test_standardize_restores_legacy_download_without_writing_posts(tmp_path):
+    database_path = tmp_path / "koc.db"
+    creator = _seed_creator(database_path, f"{PREFIX}standardize")
+    client = _authenticated_client(database_path)
+    content = _xlsx_bytes(
+        [
+            _row(
+                creator.user_id,
+                url="https://x.com/standardize",
+                title="standardized",
+                date="2026-01-05",
+            )
+        ]
+    )
+
+    response = client.post(
+        "/api/imports/standardize",
+        files={
+            "files": (
+                "data.xlsx",
+                content,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+        data={"processing_timezone": "Asia/Shanghai", "deduplicate_urls": "false"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["overall"]["uploaded_files"] == 1
+    assert body["overall"]["merged_rows"] == 1
+    assert body["overall"]["unmatched_uid_count"] == 0
+    assert body["result_preview"][0]["koc_name"] == creator.koc_name
+    assert DashboardRepository(database_path).count_posts() == 0
+
+    download = client.get(body["download_path"])
+
+    assert download.status_code == 200
+    assert "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" in download.headers["content-type"]
+    workbook = load_workbook(io.BytesIO(download.content))
+    assert workbook.sheetnames == ["整理结果", "文件处理报告", "异常数据"]
+    assert DashboardRepository(database_path).count_posts() == 0
 
 
 # ---------------------------------------------------------------------------

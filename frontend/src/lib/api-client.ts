@@ -147,11 +147,15 @@ export const apiClient = {
 export async function uploadMultipart<T>(
   path: string,
   files: File[],
-  fieldName = "files"
+  fieldName = "files",
+  fields?: Record<string, string | number | boolean>
 ): Promise<T> {
   const form = new FormData();
   for (const file of files) {
     form.append(fieldName, file, file.name);
+  }
+  for (const [key, value] of Object.entries(fields ?? {})) {
+    form.append(key, String(value));
   }
   const url = buildUrl(path);
   const res = await fetch(url, {

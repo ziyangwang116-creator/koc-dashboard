@@ -74,6 +74,40 @@ const exclusionsResponse = {
 };
 
 const previewMock = vi.fn(async () => previewResponse);
+const standardizeResponse = {
+  data: {
+    download_token: "download-1",
+    download_path: "/api/imports/standardize/download-1/download",
+    filename: "KOC_多文件整理结果_20260110_000000.xlsx",
+    expires_in_seconds: 1800,
+    timezone: "Asia/Shanghai",
+    deduplicate_urls: false,
+    overall: {
+      uploaded_files: 1,
+      successful_files: 1,
+      failed_files: 0,
+      original_rows: 2,
+      merged_rows: 2,
+      koc_count: 1,
+      earliest_date: "2026-01-05",
+      latest_date: "2026-01-06",
+      unmatched_uid_count: 0,
+      duplicate_url_count: 0,
+      missing_url_count: 0,
+      missing_title_count: 0,
+      invalid_timestamp_count: 0,
+      blank_subtype_to_shorts_count: 0,
+      removed_duplicate_count: 0,
+    },
+    file_reports: [{ source_file: "a.xlsx", original_rows: 2, processed_rows: 2, unmatched_uid: 0, duplicate_url: 0, status: "成功", error_message: "" }],
+    unmatched_uids: [],
+    result_preview: [{ koc_name: "示例达人", platform: "TikTok", publish_date: "2026-01-05", title: "t1", url: "https://x.com/1", views: 100 }],
+    result_row_count: 2,
+    exception_preview: [],
+    exception_row_count: 0,
+  },
+};
+const standardizeMock = vi.fn(async () => standardizeResponse);
 const confirmMock = vi.fn(async () => ({
   data: { batch_id: 3, mode: "REPLACE_MONTHS", period_months: ["2026-01"], input_count: 2, saved_count: 2, removed_count: 1 },
 }));
@@ -85,6 +119,7 @@ const crossIndustryUnmarkMock = vi.fn(async () => ({ data: { deactivated: 1 } })
 
 vi.mock("@/lib/endpoints", () => ({
   importsApi: {
+    standardize: (...args: Parameters<typeof standardizeMock>) => standardizeMock(...args),
     preview: (...args: Parameters<typeof previewMock>) => previewMock(...args),
     confirm: (...args: Parameters<typeof confirmMock>) => confirmMock(...args),
     rollback: (...args: Parameters<typeof rollbackMock>) => rollbackMock(...args),
@@ -106,6 +141,7 @@ function fakeFile(name = "a.xlsx") {
 
 beforeEach(() => {
   previewMock.mockClear();
+  standardizeMock.mockClear();
   confirmMock.mockClear();
   rollbackMock.mockClear();
   importBatchesMock.mockClear();
@@ -116,11 +152,31 @@ beforeEach(() => {
 });
 
 describe("ImportsPage", () => {
+  it("restores the legacy standardization preview and Excel download flow", async () => {
+    const user = userEvent.setup();
+    renderWithQueryClient(<ImportsPage />);
+
+    await user.upload(screen.getByLabelText("标准化整理文件"), fakeFile());
+    await user.click(screen.getByRole("button", { name: "开始整理" }));
+
+    await waitFor(() => expect(standardizeMock).toHaveBeenCalledWith(
+      [expect.objectContaining({ name: "a.xlsx" })],
+      "Asia/Shanghai",
+      false
+    ));
+    expect(await screen.findByText("逐文件处理报告")).toBeInTheDocument();
+    expect(screen.getByText("整理结果预览（前 100 条）")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /下载统一标准 Excel/ })).toHaveAttribute(
+      "href",
+      "/api/imports/standardize/download-1/download"
+    );
+  });
+
   it("uploads a file and renders the preview diff categories", async () => {
     const user = userEvent.setup();
     renderWithQueryClient(<ImportsPage />);
 
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const fileInput = screen.getByLabelText("导入看板数据库文件") as HTMLInputElement;
     await user.upload(fileInput, fakeFile());
     await user.click(screen.getByRole("button", { name: "生成预览" }));
 
@@ -136,7 +192,7 @@ describe("ImportsPage", () => {
     const user = userEvent.setup();
     renderWithQueryClient(<ImportsPage />);
 
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const fileInput = screen.getByLabelText("导入看板数据库文件") as HTMLInputElement;
     await user.upload(fileInput, fakeFile());
     await user.click(screen.getByRole("button", { name: "生成预览" }));
 
@@ -150,7 +206,7 @@ describe("ImportsPage", () => {
     const user = userEvent.setup();
     renderWithQueryClient(<ImportsPage />);
 
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const fileInput = screen.getByLabelText("导入看板数据库文件") as HTMLInputElement;
     await user.upload(fileInput, fakeFile());
     await user.click(screen.getByRole("button", { name: "生成预览" }));
 
@@ -226,7 +282,7 @@ describe("ImportsPage", () => {
     const user = userEvent.setup();
     renderWithQueryClient(<ImportsPage />);
 
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const fileInput = screen.getByLabelText("导入看板数据库文件") as HTMLInputElement;
     await user.upload(fileInput, fakeFile());
     await user.click(screen.getByRole("button", { name: "生成预览" }));
 
