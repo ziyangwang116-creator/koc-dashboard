@@ -1,7 +1,7 @@
 import { chromium, type Route } from "@playwright/test";
 import fs from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 
 const OUT_DIR = path.resolve(__dirname, "..", "e2e-screenshots");
 fs.mkdirSync(OUT_DIR, { recursive: true });
@@ -117,35 +117,48 @@ async function main() {
   });
 
   const browser = await chromium.launch();
-  for (const [width, height] of [[1440, 900], [390, 844]]) {
-    const context = await browser.newContext({ viewport: { width, height }, acceptDownloads: true });
-    await context.addInitScript((id) => localStorage.setItem("koc-agent-conversation-id", id), conversationId);
-    const page = await context.newPage();
-    await page.route("**/api/agent/status", (route) => fulfill(route, { data: { configured: true, provider: "deepseek", provider_label: "DeepSeek", model: "deepseek-v4-pro", read_only: true } }));
-    await page.route(`**/api/agent/conversations/${conversationId}/messages`, (route) => fulfill(route, messages));
-    await page.route("**/api/auth/logout", (route) => fulfill(route, { data: { authenticated: false } }));
-    await page.goto("http://localhost:3101/agent", { waitUntil: "networkidle" });
-    await page.getByRole("heading", { name: "白黑女神 6 月 vs 7 月" }).waitFor();
-    const tableCount = await page.locator(".agent-markdown table").count();
-    const chartCount = await page.locator(".agent-chart-canvas").count();
-    const warningCount = await page.getByText(/下降 83.6%/).count();
-    const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
-    if (tableCount !== 1 || chartCount !== 4 || warningCount < 1 || overflow) {
-      throw new Error(JSON.stringify({ width, tableCount, chartCount, warningCount, overflow }));
+  try {
+    for (const [width, height] of [[1440, 900], [390, 844]]) {
+      const context = await browser.newContext({ viewport: { width, height }, acceptDownloads: true });
+      await context.addInitScript((id) => localStorage.setItem("koc-agent-conversation-id", id), conversationId);
+      const page = await context.newPage();
+      await page.route("**/api/agent/status", (route) => fulfill(route, { data: { configured: true, provider: "deepseek", provider_label: "DeepSeek", model: "deepseek-v4-pro", read_only: true } }));
+      await page.route(`**/api/agent/conversations/${conversationId}/messages`, (route) => fulfill(route, messages));
+      await page.route("**/api/auth/logout", (route) => fulfill(route, { data: { authenticated: false } }));
+      await page.goto("http://localhost:3101/agent", { waitUntil: "networkidle" });
+      await page.getByRole("heading", { name: "白黑女神 6 月 vs 7 月" }).waitFor();
+      const tableCount = await page.locator(".agent-markdown table").count();
+      const chartCount = await page.locator(".agent-chart-canvas").count();
+      const warningCount = await page.getByText(/下降 83.6%/).count();
+      const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
+      if (tableCount !== 1 || chartCount !== 4 || warningCount < 1 || overflow) {
+        throw new Error(JSON.stringify({ width, tableCount, chartCount, warningCount, overflow }));
+      }
+      if (width === 1440) {
+        const downloadPromise = page.waitForEvent("download");
+        await page.getByRole("button", { name: "下载 白黑女神 投稿数量对比 PNG" }).click();
+        const download = await downloadPromise;
+        const downloadedPath = path.join(OUT_DIR, "agent-chart-download.png");
+        await download.saveAs(downloadedPath);
+        if (fs.statSync(downloadedPath).size < 1000) throw new Error("PNG download is empty");
+      }
+      await page.screenshot({ path: path.join(OUT_DIR, `agent-${width}x${height}.png`), fullPage: false });
+      await context.close();
     }
-    if (width === 1440) {
-      const downloadPromise = page.waitForEvent("download");
-      await page.getByRole("button", { name: "下载 白黑女神 投稿数量对比 PNG" }).click();
-      const download = await downloadPromise;
-      const downloadedPath = path.join(OUT_DIR, "agent-chart-download.png");
-      await download.saveAs(downloadedPath);
-      if (fs.statSync(downloadedPath).size < 1000) throw new Error("PNG download is empty");
+  } finally {
+    await browser.close();
+    if (server.pid && process.platform === "win32") {
+      try {
+        execFileSync("taskkill", ["/pid", String(server.pid), "/T", "/F"], {
+          stdio: "ignore",
+        });
+      } catch {
+        // The process may already have exited normally.
+      }
+    } else {
+      server.kill("SIGTERM");
     }
-    await page.screenshot({ path: path.join(OUT_DIR, `agent-${width}x${height}.png`), fullPage: false });
-    await context.close();
   }
-  await browser.close();
-  server.kill();
 }
 
 main().catch((error) => {
