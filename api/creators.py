@@ -5,6 +5,7 @@ from typing import Any, Callable
 from fastapi import APIRouter, Body, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
+from database.dashboard_repository import DashboardRepository
 from database.koc_repository import DuplicateUserIDError, KOCRepository, KOCRepositoryError
 from models.enums import CreatorCategory, FollowerSource, FollowerSyncStatus
 
@@ -123,6 +124,13 @@ def build_creators_router(
 
     def _repository() -> KOCRepository:
         return KOCRepository(database_path)
+
+    def _invalidate_compensation(reason: str, from_date: str | None = None) -> None:
+        from_month = str(from_date)[:7] if from_date else None
+        DashboardRepository(database_path).invalidate_compensation_calculation_cache(
+            from_period_month=from_month,
+            reason=reason,
+        )
 
     def _detail_payload(repository: KOCRepository, record_id: int) -> dict:
         record = repository.get(record_id)
@@ -310,6 +318,7 @@ def build_creators_router(
             new_record = repository.get_by_user_id(clean.get("user_id"))
             if new_record is None:
                 raise RuntimeError("Creator disappeared after create.")
+            _invalidate_compensation("达人资料已新增", clean.get("effective_date"))
             return 201, {"data": _detail_payload(repository, new_record.id)}
 
         return _run_idempotent(
@@ -395,6 +404,8 @@ def build_creators_router(
         except KOCRepositoryError as exc:
             raise _map_repository_error(exc) from exc
 
+        _invalidate_compensation("达人资料或粉丝数已更新")
+
         return JSONResponse(status_code=200, content={"data": _detail_payload(repository, creator_id)})
 
     @router.patch("/api/creators/{creator_id}/active")
@@ -410,6 +421,7 @@ def build_creators_router(
             repository.set_active(creator_id, bool(payload.get("active")))
         except KOCRepositoryError as exc:
             raise _map_repository_error(exc) from exc
+        _invalidate_compensation("达人启用状态已更新")
         return JSONResponse(status_code=200, content={"data": _detail_payload(repository, creator_id)})
 
     @router.post("/api/creators/{creator_id}/contract-changes", status_code=201)
@@ -439,6 +451,7 @@ def build_creators_router(
                 )
             except KOCRepositoryError as exc:
                 raise _map_repository_error(exc) from exc
+            _invalidate_compensation("合同类型或合同周期已更新", clean.get("effective_date"))
             return 201, {"data": _detail_payload(repository, creator_id)}
 
         return _run_idempotent(
@@ -529,6 +542,10 @@ def build_creators_router(
                 )
             except KOCRepositoryError as exc:
                 raise _map_repository_error(exc) from exc
+            _invalidate_compensation(
+                "合同类型或合同周期已更正",
+                min(str(source_effective_date), str(start)),
+            )
             return 200, {"data": _detail_payload(repository, creator_id)}
 
         return _run_idempotent(
@@ -556,6 +573,7 @@ def build_creators_router(
             )
         except KOCRepositoryError as exc:
             raise _map_repository_error(exc) from exc
+        _invalidate_compensation("合同周期已删除", source_effective_date)
         return JSONResponse(status_code=200, content={"data": _detail_payload(repository, creator_id)})
 
     @router.post("/api/creators/{creator_id}/contract-revisions/{revision_id}/revert")
@@ -580,6 +598,7 @@ def build_creators_router(
                 repository.revert_contract_revision(revision_id, reason=reason)
             except KOCRepositoryError as exc:
                 raise _map_repository_error(exc) from exc
+            _invalidate_compensation("合同历史修订已撤销")
             return 200, {"data": _detail_payload(repository, creator_id)}
 
         return _run_idempotent(

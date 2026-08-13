@@ -50,6 +50,22 @@ class CompensationVersion:
     locked_by: str | None = None
 
 
+@dataclass(frozen=True)
+class CompensationCalculationCache:
+    period_month: str
+    category: str
+    calculation_version: int
+    jpy_to_usd_rate: float
+    traffic_boost_enabled: bool
+    details: pd.DataFrame
+    summary: dict[str, Any]
+    status: str
+    stale_reason: str | None
+    calculated_at: str
+    invalidated_at: str | None
+    updated_at: str
+
+
 class DashboardRepository:
     """Persist dashboard posts so they remain available after app restarts."""
 
@@ -209,6 +225,7 @@ class DashboardRepository:
                     for identity in identities.values()
                 ],
             )
+        self.invalidate_compensation_calculation_cache(reason="异业排除链接已更新")
         return self.list_cross_industry_exclusions()
 
     def deactivate_cross_industry_exclusions(self, exclusion_ids: Iterable[int]) -> int:
@@ -232,7 +249,10 @@ class DashboardRepository:
                 f" WHERE id IN ({placeholders}) AND active = 1",
                 ids,
             )
-        return max(cursor.rowcount, 0)
+        changed = max(cursor.rowcount, 0)
+        if changed:
+            self.invalidate_compensation_calculation_cache(reason="异业排除链接已更新")
+        return changed
 
     def annotate_cross_industry_posts(self, data: pd.DataFrame) -> pd.DataFrame:
         return annotate_cross_industry_posts(
@@ -272,11 +292,15 @@ class DashboardRepository:
                     "SELECT COUNT(*) FROM dashboard_post"
                 ).fetchone()[0]
             )
-        return DashboardSaveResult(
+        result = DashboardSaveResult(
             input_count=len(data),
             saved_count=len(rows_by_key),
             total_count=total,
         )
+        self.invalidate_compensation_calculation_cache(
+            period_months=self._period_months(data), reason="投稿数据已更新"
+        )
+        return result
 
     @staticmethod
     def _period_months(data: pd.DataFrame) -> tuple[str, ...]:
@@ -380,13 +404,17 @@ class DashboardRepository:
                 (removed_count, batch_id),
             )
             total = int(connection.execute("SELECT COUNT(*) FROM dashboard_post").fetchone()[0])
-        return DashboardSaveResult(
+        result = DashboardSaveResult(
             input_count=len(data),
             saved_count=len(rows_by_key),
             total_count=total,
             removed_count=removed_count,
             batch_id=batch_id,
         )
+        self.invalidate_compensation_calculation_cache(
+            period_months=periods, reason="投稿数据已导入或替换"
+        )
+        return result
 
     def rollback_import_batch(self, batch_id: int) -> dict[str, int]:
         """True atomic restore of the pre-replace snapshot for one batch (19.2.3).
@@ -471,6 +499,9 @@ class DashboardRepository:
                 (batch_id,),
             )
 
+        self.invalidate_compensation_calculation_cache(
+            period_months=periods, reason="投稿数据已回滚"
+        )
         return {
             "batch_id": batch_id,
             "restored_count": len(snapshot_rows),
@@ -507,7 +538,10 @@ class DashboardRepository:
     def clear_posts(self) -> int:
         with connect(self.database_path) as connection:
             cursor = connection.execute("DELETE FROM dashboard_post")
-        return max(cursor.rowcount, 0)
+        changed = max(cursor.rowcount, 0)
+        if changed:
+            self.invalidate_compensation_calculation_cache(reason="投稿数据已清空")
+        return changed
 
     def get_jpy_to_usd_rate(self, period_month: str) -> float | None:
         with connect(self.database_path) as connection:
@@ -536,6 +570,9 @@ class DashboardRepository:
                 """,
                 (period_month, float(rate)),
             )
+        self.invalidate_compensation_calculation_cache(
+            period_months=[period_month], reason="汇率已更新"
+        )
 
     def get_traffic_boost_enabled(self, period_month: str) -> bool:
         period = self._snapshot_period_month(period_month)
@@ -563,6 +600,11 @@ class DashboardRepository:
                 """,
                 (period, int(enabled)),
             )
+        self.invalidate_compensation_calculation_cache(
+            period_months=[period],
+            categories=["GRASSROOT", "LONG_TERM"],
+            reason="流量加成设置已更新",
+        )
 
     @staticmethod
     def _clean_long_term_activity_count(value: Any) -> int | None:
@@ -640,6 +682,11 @@ class DashboardRepository:
                     """,
                     (period, creator_id, count),
                 )
+        self.invalidate_compensation_calculation_cache(
+            period_months=[period],
+            categories=["LONG_TERM"],
+            reason="长包活动数已更新",
+        )
 
     @staticmethod
     def _snapshot_contract_types(contract_types: Iterable[str]) -> tuple[str, ...]:
@@ -794,6 +841,123 @@ class DashboardRepository:
             lock_note=row["lock_note"] if "lock_note" in row.keys() else None,
             locked_by=row["locked_by"] if "locked_by" in row.keys() else None,
         )
+
+    @staticmethod
+    def _calculation_cache_from_row(row: Any) -> CompensationCalculationCache:
+        details = pd.read_json(StringIO(str(row["details_json"])), orient="records")
+        try:
+            summary = json.loads(str(row["summary_json"]))
+        except json.JSONDecodeError:
+            summary = {}
+        return CompensationCalculationCache(
+            period_month=str(row["period_month"]),
+            category=str(row["category"]),
+            calculation_version=int(row["calculation_version"]),
+            jpy_to_usd_rate=float(row["jpy_to_usd_rate"]),
+            traffic_boost_enabled=bool(row["traffic_boost_enabled"]),
+            details=details,
+            summary=summary if isinstance(summary, dict) else {},
+            status=str(row["status"]),
+            stale_reason=row["stale_reason"],
+            calculated_at=str(row["calculated_at"]),
+            invalidated_at=row["invalidated_at"],
+            updated_at=str(row["updated_at"]),
+        )
+
+    def get_compensation_calculation_cache(
+        self, period_month: str, category: str
+    ) -> CompensationCalculationCache | None:
+        period = self._snapshot_period_month(period_month)
+        with connect(self.database_path) as connection:
+            row = connection.execute(
+                "SELECT * FROM compensation_calculation_cache "
+                "WHERE period_month = ? AND category = ?",
+                (period, category),
+            ).fetchone()
+        return self._calculation_cache_from_row(row) if row is not None else None
+
+    def save_compensation_calculation_cache(
+        self,
+        period_month: str,
+        category: str,
+        *,
+        jpy_to_usd_rate: float,
+        traffic_boost_enabled: bool,
+        details: pd.DataFrame,
+        summary: dict[str, Any],
+    ) -> CompensationCalculationCache:
+        period = self._snapshot_period_month(period_month)
+        if category not in {"GRASSROOT", "LONG_TERM", "COMMENTARY"}:
+            raise ValueError("无效的结算类别。")
+        with connect(self.database_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO compensation_calculation_cache (
+                    period_month, category, calculation_version,
+                    jpy_to_usd_rate, traffic_boost_enabled,
+                    details_json, summary_json, status, stale_reason,
+                    calculated_at, invalidated_at, updated_at
+                ) VALUES (?, ?, 1, ?, ?, ?, ?, 'CURRENT', NULL,
+                          CURRENT_TIMESTAMP, NULL, CURRENT_TIMESTAMP)
+                ON CONFLICT(period_month, category) DO UPDATE SET
+                    calculation_version = compensation_calculation_cache.calculation_version + 1,
+                    jpy_to_usd_rate = excluded.jpy_to_usd_rate,
+                    traffic_boost_enabled = excluded.traffic_boost_enabled,
+                    details_json = excluded.details_json,
+                    summary_json = excluded.summary_json,
+                    status = 'CURRENT', stale_reason = NULL,
+                    calculated_at = CURRENT_TIMESTAMP, invalidated_at = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    period,
+                    category,
+                    float(jpy_to_usd_rate),
+                    int(bool(traffic_boost_enabled)),
+                    self._version_details_json(details),
+                    json.dumps(summary, ensure_ascii=False, default=str),
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM compensation_calculation_cache "
+                "WHERE period_month = ? AND category = ?",
+                (period, category),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("结算缓存保存后无法读取。")
+        return self._calculation_cache_from_row(row)
+
+    def invalidate_compensation_calculation_cache(
+        self,
+        *,
+        period_months: Iterable[str] | None = None,
+        categories: Iterable[str] | None = None,
+        reason: str,
+        from_period_month: str | None = None,
+    ) -> int:
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        periods = tuple(dict.fromkeys(period_months or ()))
+        category_values = tuple(dict.fromkeys(categories or ()))
+        if periods:
+            clauses.append("period_month IN (" + ", ".join("?" for _ in periods) + ")")
+            parameters.extend(periods)
+        if from_period_month:
+            clauses.append("period_month >= ?")
+            parameters.append(self._snapshot_period_month(from_period_month))
+        if category_values:
+            clauses.append("category IN (" + ", ".join("?" for _ in category_values) + ")")
+            parameters.extend(category_values)
+        reason_text = str(reason).strip()[:500] or "相关数据已更新"
+        with connect(self.database_path) as connection:
+            cursor = connection.execute(
+                "UPDATE compensation_calculation_cache SET status = 'STALE', "
+                "stale_reason = ?, invalidated_at = CURRENT_TIMESTAMP, "
+                "updated_at = CURRENT_TIMESTAMP"
+                + (" WHERE " + " AND ".join(clauses) if clauses else ""),
+                [reason_text, *parameters],
+            )
+        return max(cursor.rowcount, 0)
 
     def _get_version_by_id(self, table_name: str, version_id: int) -> CompensationVersion | None:
         with connect(self.database_path) as connection:
@@ -1237,6 +1401,11 @@ class DashboardRepository:
                 """,
                 (period, new_revision),
             )
+        self.invalidate_compensation_calculation_cache(
+            period_months=[period],
+            categories=["COMMENTARY"],
+            reason="解说指定主题申报已更新",
+        )
         return len(values)
 
 

@@ -58,6 +58,7 @@ CONTRACT_REVISION_AUDIT_MIGRATION_ID = "v2.0_contract_revision_audit"
 AI_AGENT_STORAGE_MIGRATION_ID = "v2.1_ai_agent_storage"
 DASHBOARD_IMPORT_SNAPSHOT_MIGRATION_ID = "v2.2_dashboard_import_batch_snapshot"
 SETTLEMENT_LOCK_AUDIT_MIGRATION_ID = "v2.3_settlement_lock_audit"
+COMPENSATION_CALCULATION_CACHE_MIGRATION_ID = "v2.4_compensation_calculation_cache"
 FOLLOWER_AUDIT_COLUMNS = (
     "id",
     "user_id",
@@ -1056,6 +1057,38 @@ def _create_settlement_lock_audit(connection: sqlite3.Connection) -> None:
     )
 
 
+def _create_compensation_calculation_cache(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS compensation_calculation_cache (
+            period_month TEXT NOT NULL,
+            category TEXT NOT NULL CHECK (
+                category IN ('GRASSROOT', 'LONG_TERM', 'COMMENTARY')
+            ),
+            calculation_version INTEGER NOT NULL DEFAULT 1,
+            jpy_to_usd_rate REAL NOT NULL CHECK (jpy_to_usd_rate > 0),
+            traffic_boost_enabled INTEGER NOT NULL DEFAULT 0 CHECK (
+                traffic_boost_enabled IN (0, 1)
+            ),
+            details_json TEXT NOT NULL,
+            summary_json TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'CURRENT' CHECK (
+                status IN ('CURRENT', 'STALE')
+            ),
+            stale_reason TEXT,
+            calculated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            invalidated_at TEXT,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (period_month, category)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_compensation_cache_status "
+        "ON compensation_calculation_cache(status, period_month, category)"
+    )
+
+
 def _current_columns(connection: sqlite3.Connection) -> tuple[str, ...]:
     return tuple(
         str(row[1]) for row in connection.execute("PRAGMA table_info(koc_master)")
@@ -1406,6 +1439,8 @@ def apply_migrations(
     )
     _create_settlement_lock_audit(connection)
     _record_migration(connection, SETTLEMENT_LOCK_AUDIT_MIGRATION_ID)
+    _create_compensation_calculation_cache(connection)
+    _record_migration(connection, COMPENSATION_CALCULATION_CACHE_MIGRATION_ID)
 
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_koc_master_user_id ON koc_master(user_id)"

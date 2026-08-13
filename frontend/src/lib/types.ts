@@ -324,6 +324,18 @@ export interface CompensationVersion {
 
 export type CompensationMode = "preview" | "saved_draft" | "frozen";
 
+export interface CompensationCalculationMeta {
+  source: "cache" | "saved_draft" | "locked_version";
+  status: "CURRENT" | "STALE" | "DRAFT" | "LOCKED";
+  is_stale: boolean;
+  calculation_version?: number | null;
+  calculated_at: string | null;
+  invalidated_at?: string | null;
+  stale_reason?: string | null;
+  calculated_with_jpy_to_usd_rate?: number | null;
+  calculated_with_traffic_boost_enabled?: boolean;
+}
+
 export interface CompensationMeta {
   request_id: string;
   mode: CompensationMode;
@@ -333,6 +345,7 @@ export interface CompensationMeta {
   version: { version_id: number; version_no: number | null; status: string } | null;
   currency: Record<string, unknown>;
   summary: Record<string, number | null>;
+  calculation: CompensationCalculationMeta;
   pagination: Pagination;
 }
 

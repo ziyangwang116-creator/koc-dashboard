@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from api.main import create_app
 from config.settings import Settings
+from database.db import connect
 from database.dashboard_repository import DashboardRepository
 from database.koc_repository import KOCRepository
 from models.enums import ContractType, CreatorCategory
@@ -222,6 +223,88 @@ def test_grassroot_preview_isolates_category(tmp_path):
     creator_keys = {row["creator_key"] for row in body["data"]}
     assert grassroot.user_id in creator_keys
     assert long_term.user_id not in creator_keys
+
+
+def test_preview_cache_becomes_stale_and_only_recalculate_replaces_it(tmp_path):
+    database_path = tmp_path / "koc.db"
+    grassroot, long_term = _seed_creators(database_path)
+    _seed_posts(database_path, grassroot, long_term)
+    repository = DashboardRepository(database_path)
+    repository.save_jpy_to_usd_rate("2026-06", 150.0)
+    client = _authenticated_client(database_path)
+
+    first = client.get(
+        "/api/compensation/grassroot",
+        params={"period_month": "2026-06", "page_size": 100},
+    )
+    assert first.status_code == 200
+    first_body = first.json()
+    assert first_body["meta"]["calculation"]["status"] == "CURRENT"
+    assert first_body["meta"]["calculation"]["calculation_version"] == 1
+    first_details = first_body["data"]
+
+    repository.save_jpy_to_usd_rate("2026-06", 151.0)
+    stale = client.get(
+        "/api/compensation/grassroot",
+        params={"period_month": "2026-06", "page_size": 100},
+    )
+    assert stale.status_code == 200
+    stale_body = stale.json()
+    assert stale_body["data"] == first_details
+    assert stale_body["meta"]["calculation"]["status"] == "STALE"
+    assert stale_body["meta"]["calculation"]["stale_reason"] == "汇率已更新"
+    assert stale_body["meta"]["calculation"]["calculation_version"] == 1
+
+    recalculated = client.post("/api/compensation/grassroot/2026-06/recalculate")
+    assert recalculated.status_code == 200
+    recalculation = recalculated.json()["data"]["calculation"]
+    assert recalculation["status"] == "CURRENT"
+    assert recalculation["calculation_version"] == 2
+
+    refreshed = client.get(
+        "/api/compensation/grassroot",
+        params={"period_month": "2026-06", "page_size": 100},
+    )
+    assert refreshed.status_code == 200
+    assert refreshed.json()["meta"]["calculation"]["status"] == "CURRENT"
+    assert refreshed.json()["meta"]["calculation"]["calculation_version"] == 2
+
+
+def test_repeated_cache_invalidation_refreshes_stale_metadata(tmp_path):
+    database_path = tmp_path / "koc.db"
+    repository = DashboardRepository(database_path)
+    repository.save_compensation_calculation_cache(
+        "2026-07",
+        "GRASSROOT",
+        jpy_to_usd_rate=0.0062,
+        traffic_boost_enabled=False,
+        details=pd.DataFrame([{"creator_key": "creator-1"}]),
+        summary={"creator_count": 1},
+    )
+
+    assert repository.invalidate_compensation_calculation_cache(
+        period_months=["2026-07"],
+        categories=["GRASSROOT"],
+        reason="first change",
+    ) == 1
+    with connect(database_path) as connection:
+        connection.execute(
+            "UPDATE compensation_calculation_cache "
+            "SET invalidated_at = '2000-01-01 00:00:00' "
+            "WHERE period_month = '2026-07' AND category = 'GRASSROOT'"
+        )
+
+    assert repository.invalidate_compensation_calculation_cache(
+        period_months=["2026-07"],
+        categories=["GRASSROOT"],
+        reason="second change",
+    ) == 1
+    cache = repository.get_compensation_calculation_cache("2026-07", "GRASSROOT")
+
+    assert cache is not None
+    assert cache.status == "STALE"
+    assert cache.stale_reason == "second change"
+    assert cache.invalidated_at != "2000-01-01 00:00:00"
 
 
 def test_long_term_preview_isolates_category(tmp_path):

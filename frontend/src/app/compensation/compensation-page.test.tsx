@@ -80,6 +80,15 @@ const grassrootResponse = {
     traffic_boost_enabled: true,
     version: null,
     currency: {},
+    calculation: {
+      source: "cache",
+      status: "CURRENT",
+      is_stale: false,
+      calculation_version: 1,
+      calculated_at: "2026-07-03T09:30:00Z",
+      invalidated_at: null,
+      stale_reason: null,
+    },
     summary: {
       total_amount_jpy: 970000,
       creator_receivable_usd: 6514.0,
@@ -96,6 +105,13 @@ vi.mock("@/lib/endpoints", () => ({
     grassroot: vi.fn(async () => grassrootResponse),
     longTerm: vi.fn(async () => ({ data: [], meta: grassrootResponse.meta })),
     commentary: vi.fn(async () => ({ data: [], meta: grassrootResponse.meta })),
+    recalculate: vi.fn(async () => ({
+      data: {
+        period_month: "2026-07",
+        category: "GRASSROOT",
+        calculation: grassrootResponse.meta.calculation,
+      },
+    })),
     themeSubmissions: vi.fn(async () => ({ data: [], meta: { period_month: "2026-07", revision: "rev_0" } })),
     saveExchangeRate: vi.fn(async () => ({ data: { period_month: "2026-07", rate: 0.0067 } })),
     saveLongTermActivityCounts: vi.fn(async () => ({ data: { period_month: "2026-07", updated_count: 0 } })),
@@ -122,6 +138,20 @@ describe("CompensationPage", () => {
     await waitFor(() => expect(screen.getByText("草根达人")).toBeInTheDocument());
     expect(screen.getAllByText("$6514.00").length).toBeGreaterThan(0);
     expect(screen.getAllByText("当前预览").length).toBeGreaterThan(0);
+    expect(screen.getByText("使用缓存结果，数据已是最新")).toBeInTheDocument();
+    expect(screen.getByText(/上次计算时间/)).toBeInTheDocument();
+  });
+
+  it("recalculates the selected lane and month on demand", async () => {
+    const user = userEvent.setup();
+    renderWithQueryClient(<CompensationPage />);
+    await waitFor(() => expect(screen.getByText("使用缓存结果，数据已是最新")).toBeInTheDocument());
+
+    await user.click(screen.getByRole("button", { name: "重新计算本月" }));
+
+    await waitFor(() =>
+      expect(compensationApi.recalculate).toHaveBeenCalledWith("grassroot", "2026-07")
+    );
   });
 
   it("saves the exchange rate", async () => {

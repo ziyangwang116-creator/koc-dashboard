@@ -617,6 +617,20 @@ def _stored_summary_dict(
     return result
 
 
+def _calculation_meta(cache, *, source: str = "cache") -> dict[str, Any]:
+    return {
+        "source": source,
+        "status": cache.status,
+        "is_stale": cache.status == "STALE",
+        "calculation_version": cache.calculation_version,
+        "calculated_at": cache.calculated_at,
+        "invalidated_at": cache.invalidated_at,
+        "stale_reason": cache.stale_reason,
+        "calculated_with_jpy_to_usd_rate": cache.jpy_to_usd_rate,
+        "calculated_with_traffic_boost_enabled": cache.traffic_boost_enabled,
+    }
+
+
 def _version_meta(version) -> dict[str, Any]:
     return {
         "version_id": version.id,
@@ -719,6 +733,81 @@ def build_compensation_router(
 
     def _creator_repository() -> KOCRepository:
         return KOCRepository(database_path)
+
+    def _calculate_current_cache(category: str, period_key: str, selected_month):
+        repository = _repository()
+        jpy_to_usd_rate = repository.get_jpy_to_usd_rate(period_key)
+        if jpy_to_usd_rate is None:
+            raise validation_error("该月尚未保存 JPY→USD 汇率", "jpy_to_usd_rate")
+        traffic_boost_enabled = (
+            repository.get_traffic_boost_enabled(period_key)
+            if category in {"GRASSROOT", "LONG_TERM"}
+            and is_july_traffic_boost_month(selected_month)
+            else False
+        )
+        data, _creator_records = _load_enriched_posts(database_path)
+        creator_repository = _creator_repository()
+        creator_records = creator_repository.list(include_inactive=True)
+        month_data = _month_data(data, selected_month)
+
+        if category == "GRASSROOT":
+            result = calculate_grassroot_compensation(
+                month_data,
+                creator_records,
+                jpy_to_usd_rate=jpy_to_usd_rate,
+                traffic_boost_enabled=traffic_boost_enabled,
+            )
+            summary = _summary_dict(result, _grassroot_api_row)
+        elif category == "LONG_TERM":
+            long_term_records = [
+                record
+                for record in creator_records
+                if CreatorCategory.LONG_TERM in record.creator_categories
+            ]
+            result = calculate_long_term_compensation(
+                month_data,
+                long_term_records,
+                jpy_to_usd_rate=jpy_to_usd_rate,
+                event_counts=repository.get_long_term_activity_counts(period_key),
+                period_start=selected_month,
+                period_end=_month_end(selected_month),
+                traffic_boost_enabled=traffic_boost_enabled,
+            )
+            summary = _summary_dict(result, _long_term_api_row)
+        elif category == "COMMENTARY":
+            commentary_records = [
+                record
+                for record in creator_records
+                if CreatorCategory.COMMENTARY in record.creator_categories
+            ]
+            result = calculate_commentary_compensation(
+                month_data,
+                commentary_records,
+                period_month=period_key,
+                jpy_to_usd_rate=jpy_to_usd_rate,
+                profile_history=creator_repository.list_profile_history(),
+                theme_submissions=repository.list_commentary_theme_submissions(period_key),
+                theme_definitions=repository.list_commentary_theme_definitions(period_key),
+            )
+            summary = _summary_dict(result, _commentary_api_row)
+        else:
+            raise validation_error("无效的结算类别。", "category")
+
+        return repository.save_compensation_calculation_cache(
+            period_key,
+            category,
+            jpy_to_usd_rate=jpy_to_usd_rate,
+            traffic_boost_enabled=traffic_boost_enabled,
+            details=result.details,
+            summary=summary,
+        )
+
+    def _current_or_initial_cache(category: str, period_key: str, selected_month):
+        repository = _repository()
+        cache = repository.get_compensation_calculation_cache(period_key, category)
+        if cache is None:
+            cache = _calculate_current_cache(category, period_key, selected_month)
+        return cache
 
     def _run_idempotent(
         *,
@@ -883,28 +972,18 @@ def build_compensation_router(
             summary_out = _stored_summary_dict(summary, details, _grassroot_api_row)
             version_meta = _version_meta(version)
         else:
-            jpy_to_usd_rate = repository.get_jpy_to_usd_rate(period_key)
-            if jpy_to_usd_rate is None:
-                raise validation_error("该月尚未保存 JPY→USD 汇率", "jpy_to_usd_rate")
+            cache = _current_or_initial_cache("GRASSROOT", period_key, selected_month)
+            details = cache.details
+            summary_out = _stored_summary_dict(cache.summary, details, _grassroot_api_row)
+            jpy_to_usd_rate = repository.get_jpy_to_usd_rate(period_key) or cache.jpy_to_usd_rate
             traffic_boost_enabled = (
                 repository.get_traffic_boost_enabled(period_key)
                 if is_july_traffic_boost_month(selected_month)
                 else False
             )
-            data, _creator_records = _load_enriched_posts(database_path)
-            creator_repository = _creator_repository()
-            creator_records = creator_repository.list(include_inactive=True)
-            month_data = _month_data(data, selected_month)
-            result = calculate_grassroot_compensation(
-                month_data,
-                creator_records,
-                jpy_to_usd_rate=jpy_to_usd_rate,
-                traffic_boost_enabled=traffic_boost_enabled,
-            )
-            details = result.details
-            summary_out = _summary_dict(result, _grassroot_api_row)
             mode = "preview"
             version_meta = None
+            calculation = _calculation_meta(cache)
 
         rows: list[dict] = []
         for _, row in details.iterrows():
@@ -952,6 +1031,12 @@ def build_compensation_router(
             "version": version_meta,
             "currency": _currency_block(include_traffic_boost=True),
             "summary": summary_out,
+            "calculation": calculation if version_id is None else {
+                "source": "locked_version" if mode == "frozen" else "saved_draft",
+                "status": "LOCKED" if mode == "frozen" else "DRAFT",
+                "is_stale": False,
+                "calculated_at": version_meta.get("updated_at") if version_meta else None,
+            },
             "pagination": pagination,
         }
         return {"data": page_rows, "meta": meta}
@@ -995,36 +1080,18 @@ def build_compensation_router(
             summary_out = _stored_summary_dict(summary, details, _long_term_api_row)
             version_meta = _version_meta(version)
         else:
-            jpy_to_usd_rate = repository.get_jpy_to_usd_rate(period_key)
-            if jpy_to_usd_rate is None:
-                raise validation_error("该月尚未保存 JPY→USD 汇率", "jpy_to_usd_rate")
+            cache = _current_or_initial_cache("LONG_TERM", period_key, selected_month)
+            details = cache.details
+            summary_out = _stored_summary_dict(cache.summary, details, _long_term_api_row)
+            jpy_to_usd_rate = repository.get_jpy_to_usd_rate(period_key) or cache.jpy_to_usd_rate
             traffic_boost_enabled = (
                 repository.get_traffic_boost_enabled(period_key)
                 if is_july_traffic_boost_month(selected_month)
                 else False
             )
-            data, _creator_records = _load_enriched_posts(database_path)
-            creator_repository = _creator_repository()
-            creator_records = [
-                record
-                for record in creator_repository.list(include_inactive=True)
-                if CreatorCategory.LONG_TERM in record.creator_categories
-            ]
-            month_data = _month_data(data, selected_month)
-            event_counts = repository.get_long_term_activity_counts(period_key)
-            result = calculate_long_term_compensation(
-                month_data,
-                creator_records,
-                jpy_to_usd_rate=jpy_to_usd_rate,
-                event_counts=event_counts,
-                period_start=selected_month,
-                period_end=_month_end(selected_month),
-                traffic_boost_enabled=traffic_boost_enabled,
-            )
-            details = result.details
-            summary_out = _summary_dict(result, _long_term_api_row)
             mode = "preview"
             version_meta = None
+            calculation = _calculation_meta(cache)
 
         rows: list[dict] = []
         for _, row in details.iterrows():
@@ -1064,6 +1131,12 @@ def build_compensation_router(
             "version": version_meta,
             "currency": _currency_block(include_traffic_boost=True),
             "summary": summary_out,
+            "calculation": calculation if version_id is None else {
+                "source": "locked_version" if mode == "frozen" else "saved_draft",
+                "status": "LOCKED" if mode == "frozen" else "DRAFT",
+                "is_stale": False,
+                "calculated_at": version_meta.get("updated_at") if version_meta else None,
+            },
             "pagination": pagination,
         }
         return {"data": page_rows, "meta": meta}
@@ -1106,33 +1179,13 @@ def build_compensation_router(
             summary_out = _stored_summary_dict(summary, details, _commentary_api_row)
             version_meta = _version_meta(version)
         else:
-            jpy_to_usd_rate = repository.get_jpy_to_usd_rate(period_key)
-            if jpy_to_usd_rate is None:
-                raise validation_error("该月尚未保存 JPY→USD 汇率", "jpy_to_usd_rate")
-            data, _creator_records = _load_enriched_posts(database_path)
-            creator_repository = _creator_repository()
-            creator_records = [
-                record
-                for record in creator_repository.list(include_inactive=True)
-                if CreatorCategory.COMMENTARY in record.creator_categories
-            ]
-            month_data = _month_data(data, selected_month)
-            submissions = repository.list_commentary_theme_submissions(period_key)
-            definitions = repository.list_commentary_theme_definitions(period_key)
-            profile_history = creator_repository.list_profile_history()
-            result = calculate_commentary_compensation(
-                month_data,
-                creator_records,
-                period_month=period_key,
-                jpy_to_usd_rate=jpy_to_usd_rate,
-                profile_history=profile_history,
-                theme_submissions=submissions,
-                theme_definitions=definitions,
-            )
-            details = result.details
-            summary_out = _summary_dict(result, _commentary_api_row)
+            cache = _current_or_initial_cache("COMMENTARY", period_key, selected_month)
+            details = cache.details
+            summary_out = _stored_summary_dict(cache.summary, details, _commentary_api_row)
+            jpy_to_usd_rate = repository.get_jpy_to_usd_rate(period_key) or cache.jpy_to_usd_rate
             mode = "preview"
             version_meta = None
+            calculation = _calculation_meta(cache)
 
         rows: list[dict] = []
         for _, row in details.iterrows():
@@ -1173,9 +1226,35 @@ def build_compensation_router(
             "version": version_meta,
             "currency": _currency_block(include_traffic_boost=False),
             "summary": summary_out,
+            "calculation": calculation if version_id is None else {
+                "source": "locked_version" if mode == "frozen" else "saved_draft",
+                "status": "LOCKED" if mode == "frozen" else "DRAFT",
+                "is_stale": False,
+                "calculated_at": version_meta.get("updated_at") if version_meta else None,
+            },
             "pagination": pagination,
         }
         return {"data": page_rows, "meta": meta}
+
+    @router.post("/api/compensation/{lane}/{period_month}/recalculate")
+    def recalculate_compensation(lane: str, period_month: str) -> dict:
+        category_map = {
+            "grassroot": "GRASSROOT",
+            "long-term": "LONG_TERM",
+            "commentary": "COMMENTARY",
+        }
+        category = category_map.get(lane)
+        if category is None:
+            raise validation_error("无效的结算类别。", "lane")
+        selected_month = _parse_period_month(period_month)
+        cache = _calculate_current_cache(category, period_month, selected_month)
+        return {
+            "data": {
+                "period_month": period_month,
+                "category": category,
+                "calculation": _calculation_meta(cache),
+            }
+        }
 
     # ------------------------------------------------------------------
     # 18.5 versions

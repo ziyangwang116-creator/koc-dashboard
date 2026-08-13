@@ -9,6 +9,9 @@ POSTGRES_COMMENTARY_THEME_COMPAT_MIGRATION_ID = "postgres_v3_commentary_theme_ob
 POSTGRES_IMPORT_ROLLBACK_AND_LOCK_AUDIT_MIGRATION_ID = (
     "postgres_v4_import_rollback_and_lock_audit"
 )
+POSTGRES_COMPENSATION_CALCULATION_CACHE_MIGRATION_ID = (
+    "postgres_v5_compensation_calculation_cache"
+)
 
 
 POSTGRES_SCHEMA_STATEMENTS = (
@@ -499,6 +502,37 @@ POSTGRES_IMPORT_ROLLBACK_AND_LOCK_AUDIT_INDEX_STATEMENTS = (
     "ON dashboard_import_batch_snapshot(batch_id)",
 )
 
+POSTGRES_COMPENSATION_CALCULATION_CACHE_STATEMENTS = (
+    """
+    CREATE TABLE IF NOT EXISTS compensation_calculation_cache (
+        period_month TEXT NOT NULL,
+        category TEXT NOT NULL CHECK (
+            category IN ('GRASSROOT', 'LONG_TERM', 'COMMENTARY')
+        ),
+        calculation_version INTEGER NOT NULL DEFAULT 1,
+        jpy_to_usd_rate DOUBLE PRECISION NOT NULL CHECK (jpy_to_usd_rate > 0),
+        traffic_boost_enabled INTEGER NOT NULL DEFAULT 0 CHECK (
+            traffic_boost_enabled IN (0, 1)
+        ),
+        details_json TEXT NOT NULL,
+        summary_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'CURRENT' CHECK (
+            status IN ('CURRENT', 'STALE')
+        ),
+        stale_reason TEXT,
+        calculated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+        invalidated_at TEXT,
+        updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+        PRIMARY KEY (period_month, category)
+    )
+    """,
+)
+
+POSTGRES_COMPENSATION_CALCULATION_CACHE_INDEX_STATEMENTS = (
+    "CREATE INDEX IF NOT EXISTS idx_compensation_cache_status "
+    "ON compensation_calculation_cache(status, period_month, category)",
+)
+
 
 JULY_COMMENTARY_THEMES = (
     (
@@ -621,5 +655,19 @@ def apply_postgres_migrations(
         connection.execute(
             "INSERT INTO schema_migrations (migration_id) VALUES (?)",
             (POSTGRES_IMPORT_ROLLBACK_AND_LOCK_AUDIT_MIGRATION_ID,),
+        )
+
+    calculation_cache_applied = connection.execute(
+        "SELECT 1 FROM schema_migrations WHERE migration_id = ?",
+        (POSTGRES_COMPENSATION_CALCULATION_CACHE_MIGRATION_ID,),
+    ).fetchone()
+    if calculation_cache_applied is None:
+        for statement in POSTGRES_COMPENSATION_CALCULATION_CACHE_STATEMENTS:
+            connection.execute(statement)
+        for statement in POSTGRES_COMPENSATION_CALCULATION_CACHE_INDEX_STATEMENTS:
+            connection.execute(statement)
+        connection.execute(
+            "INSERT INTO schema_migrations (migration_id) VALUES (?)",
+            (POSTGRES_COMPENSATION_CALCULATION_CACHE_MIGRATION_ID,),
         )
     _seed_default_creators(connection, seed_records)

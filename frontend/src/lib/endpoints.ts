@@ -145,6 +145,11 @@ export const compensationApi = {
     apiClient.get<CompensationListResponse<LongTermRow>>("/compensation/long-term", params),
   commentary: (params: Record<string, unknown>) =>
     apiClient.get<CompensationListResponse<CommentaryRow>>("/compensation/commentary", params),
+  recalculate: (lane: "grassroot" | "long-term" | "commentary", periodMonth: string) =>
+    apiClient.post<{ data: { period_month: string; category: string; calculation: CompensationMeta["calculation"] } }>(
+      `/compensation/${lane}/${periodMonth}/recalculate`,
+      {}
+    ),
   themeSubmissions: (params: Record<string, unknown>) =>
     apiClient.get<{ data: ThemeSubmission[]; meta: ThemeSubmissionsMeta }>(
       "/compensation/commentary/theme-submissions",

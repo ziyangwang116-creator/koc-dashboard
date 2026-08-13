@@ -9,6 +9,7 @@ from typing import Any, Callable
 from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import JSONResponse
 
+from database.dashboard_repository import DashboardRepository
 from database.koc_repository import KOCRepository
 from followers.base import FollowerFetchResult
 from followers.manual_provider import ManualProvider
@@ -145,6 +146,7 @@ def _run_job(
     required_platform: str | None,
     platform_by_record: dict[int, str | None] | None,
     pre_rows: list[tuple[dict[str, Any], str, str | None]] | None = None,
+    on_success: Callable[[], None] | None = None,
 ) -> None:
     """Background worker for one batch-update job.
 
@@ -181,6 +183,9 @@ def _run_job(
                 platform_by_record=platform_by_record,
                 progress_callback=_progress_callback,
             )
+        job = job_store.get(job_id)
+        if on_success is not None and job is not None and int(job.get("success", 0)) > 0:
+            on_success()
         job_store.mark_succeeded(job_id)
     except Exception:  # noqa: BLE001 - job-level crash boundary, never a per-record failure
         job_store.mark_failed(job_id)
@@ -222,6 +227,11 @@ def build_followers_router(
 
     def _operator_name(ctx: Any) -> str | None:
         return ctx.get("operator_name") if isinstance(ctx, dict) else None
+
+    def _invalidate_compensation() -> None:
+        DashboardRepository(database_path).invalidate_compensation_calculation_cache(
+            reason="达人粉丝数已更新"
+        )
 
     # ------------------------------------------------------------------
     # Manual single-creator follower-count input (operator-typed values,
@@ -292,6 +302,8 @@ def build_followers_router(
                     "message": fetch_result.error_message,
                 }
 
+        if any(result.get("status") == "成功" for result in results.values()):
+            _invalidate_compensation()
         return JSONResponse(
             status_code=200,
             content={"data": {"record_id": record.id, "results": results}},
@@ -324,7 +336,7 @@ def build_followers_router(
         job_id = job_store.create(total=len(record_ids))
         threading.Thread(
             target=_run_job,
-            args=(job_id, job_store, service, record_ids, required_platform, platform_by_record),
+            args=(job_id, job_store, service, record_ids, required_platform, platform_by_record, None, _invalidate_compensation),
             daemon=True,
         ).start()
 
@@ -406,7 +418,7 @@ def build_followers_router(
         job_id = job_store.create(total=len(candidates))
         threading.Thread(
             target=_run_job,
-            args=(job_id, job_store, service, eligible_ids, "TikTok", None, pre_rows),
+            args=(job_id, job_store, service, eligible_ids, "TikTok", None, pre_rows, _invalidate_compensation),
             daemon=True,
         ).start()
 
@@ -436,7 +448,7 @@ def build_followers_router(
         job_id = job_store.create(total=len(ids))
         threading.Thread(
             target=_run_job,
-            args=(job_id, job_store, service, ids, "YouTube", None, None),
+            args=(job_id, job_store, service, ids, "YouTube", None, None, _invalidate_compensation),
             daemon=True,
         ).start()
 

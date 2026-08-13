@@ -126,6 +126,8 @@ export default function CompensationPage() {
   const activeQuery = lane === "GRASSROOT" ? grassrootQuery : lane === "LONG_TERM" ? longTermQuery : commentaryQuery;
   const mode: CompensationMode = (activeQuery.data?.meta.mode as CompensationMode) ?? "preview";
   const summary = activeQuery.data?.meta.summary;
+  const calculation = activeQuery.data?.meta.calculation;
+  const isCalculationStale = mode === "preview" && Boolean(calculation?.is_stale);
   const laneLabel = LANES.find((item) => item.key === lane)?.label ?? "";
   const currentRate = activeQuery.data?.meta.jpy_to_usd_rate;
 
@@ -226,6 +228,15 @@ export default function CompensationPage() {
         setActionMessage({ kind: "error", text: errorMessageOf(err) });
       }
     },
+  });
+
+  const recalculateMutation = useMutation({
+    mutationFn: () => compensationApi.recalculate(LANE_PATH[lane], effectiveMonth),
+    onSuccess: () => {
+      setActionMessage({ kind: "success", text: `${laneLabel}${effectiveMonth} 已重新计算并更新缓存。` });
+      invalidateForLane(lane, effectiveMonth);
+    },
+    onError: (err) => setActionMessage({ kind: "error", text: errorMessageOf(err) }),
   });
 
   function addThemeSubmission() {
@@ -376,6 +387,48 @@ export default function CompensationPage() {
           <ModeBadge mode={mode} />
         </div>
 
+        {calculation && (
+          <div
+            style={{
+              ...calculationPanel,
+              ...(mode === "frozen"
+                ? calculationPanelLocked
+                : calculation.is_stale
+                  ? calculationPanelStale
+                  : calculationPanelCurrent),
+            }}
+          >
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontWeight: 700, fontSize: 13 }}>
+                {mode === "frozen"
+                  ? "锁定版本，不受当前数据影响"
+                  : mode === "saved_draft"
+                    ? "已保存草稿，不受实时缓存自动覆盖"
+                    : calculation.is_stale
+                      ? "数据已变化，需要重新计算"
+                      : "使用缓存结果，数据已是最新"}
+              </div>
+              <div style={{ marginTop: 4, fontSize: 12, color: "var(--color-text-muted)" }}>
+                上次计算时间：{calculation.calculated_at ? new Date(calculation.calculated_at).toLocaleString("zh-CN") : "—"}
+                {calculation.calculation_version ? ` · 计算版本 v${calculation.calculation_version}` : ""}
+              </div>
+              {calculation.is_stale && calculation.stale_reason && (
+                <div style={{ marginTop: 4, fontSize: 12 }}>变化原因：{calculation.stale_reason}</div>
+              )}
+            </div>
+            {mode === "preview" && (
+              <button
+                type="button"
+                style={primaryBtn}
+                disabled={recalculateMutation.isPending}
+                onClick={() => recalculateMutation.mutate()}
+              >
+                {recalculateMutation.isPending ? "正在重新计算…" : "重新计算本月"}
+              </button>
+            )}
+          </div>
+        )}
+
         <div style={panelStyle}>
           <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-end" }}>
             <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12.5 }}>
@@ -416,7 +469,7 @@ export default function CompensationPage() {
                 <button
                   type="button"
                   style={primaryBtn}
-                  disabled={createDraftMutation.isPending || (activeQuery.data?.data.length ?? 0) === 0}
+                  disabled={createDraftMutation.isPending || isCalculationStale || (activeQuery.data?.data.length ?? 0) === 0}
                   onClick={() => createDraftMutation.mutate()}
                 >
                   基于当前预览创建结算草稿
@@ -427,7 +480,7 @@ export default function CompensationPage() {
                   <button
                     type="button"
                     style={primaryBtn}
-                    disabled={updateDraftMutation.isPending}
+                    disabled={updateDraftMutation.isPending || isCalculationStale}
                     onClick={() => updateDraftMutation.mutate()}
                   >
                     更新该草稿
@@ -750,6 +803,34 @@ const panelStyle: React.CSSProperties = {
   border: "1px solid var(--color-border)",
   borderRadius: "var(--radius)",
   padding: 12,
+};
+
+const calculationPanel: React.CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: 16,
+  flexWrap: "wrap",
+  border: "1px solid var(--color-border)",
+  borderRadius: "var(--radius)",
+  padding: "10px 12px",
+};
+
+const calculationPanelCurrent: React.CSSProperties = {
+  background: "#f0fdf4",
+  borderColor: "#86efac",
+  color: "#166534",
+};
+
+const calculationPanelStale: React.CSSProperties = {
+  background: "#fff7ed",
+  borderColor: "#fdba74",
+  color: "#9a3412",
+};
+
+const calculationPanelLocked: React.CSSProperties = {
+  background: "var(--color-bg-subtle)",
+  color: "var(--color-text-muted)",
 };
 
 const summaryCard: React.CSSProperties = {
