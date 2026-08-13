@@ -26,6 +26,7 @@ import type {
 } from "@/lib/types";
 
 type PeriodMode = "month" | "week";
+type TrafficBoostMode = "original" | "boosted_preview";
 
 function previousNaturalMonth(month: string): string {
   const match = /^(\d{4})-(\d{2})$/.exec(month);
@@ -63,6 +64,7 @@ export default function DashboardPage() {
   const [contentType, setContentType] = useState("");
   const [category, setCategory] = useState("");
   const [includeCrossIndustry, setIncludeCrossIndustry] = useState(false);
+  const [trafficBoostMode, setTrafficBoostMode] = useState<TrafficBoostMode>("original");
   const [postPage, setPostPage] = useState(1);
   const [showColumnSettings, setShowColumnSettings] = useState(false);
   const [visiblePostColumns, setVisiblePostColumns] = useState(DEFAULT_POST_COLUMN_KEYS);
@@ -96,8 +98,9 @@ export default function DashboardPage() {
       content_type: contentType || undefined,
       creator_category: category || undefined,
       include_cross_industry: includeCrossIndustry,
+      traffic_boost_mode: trafficBoostMode,
     }),
-    [creatorKey, platform, contentType, category, includeCrossIndustry]
+    [creatorKey, platform, contentType, category, includeCrossIndustry, trafficBoostMode]
   );
   const canQuery = periodMode === "month" ? Boolean(effectiveMonth) : Boolean(effectiveWeekStart);
 
@@ -138,6 +141,7 @@ export default function DashboardPage() {
       source_platform: platform ? [platform] : [],
       content_type: contentType ? [contentType] : [],
       include_cross_industry: includeCrossIndustry,
+      traffic_boost_mode: trafficBoostMode,
     }),
     enabled: periodMode === "month" && Boolean(effectiveMonth && effectiveComparisonMonth),
   });
@@ -151,6 +155,9 @@ export default function DashboardPage() {
   const postPagination = postsQuery.data?.meta.pagination;
   const totalViews = summaryRows.reduce((sum, row) => sum + row.total_views, 0);
   const totalPosts = summaryRows.reduce((sum, row) => sum + row.post_count, 0);
+  const coveredCreators = new Set(
+    summaryRows.filter((row) => row.post_count > 0).map((row) => row.creator_key)
+  ).size;
   const trendData = useMemo(
     () =>
       postRows
@@ -211,13 +218,17 @@ export default function DashboardPage() {
           <FilterSelect label="全部平台" value={platform} onChange={(value) => { setPlatform(value); setPostPage(1); }} options={(options?.source_platforms ?? []).map((item) => [item, item])} />
           <FilterSelect label="全部视频类型" value={contentType} onChange={(value) => { setContentType(value); setPostPage(1); }} options={(options?.content_types ?? []).map((item) => [item, item])} />
           <FilterSelect label="全部合作类别" value={category} onChange={(value) => { setCategory(value); setPostPage(1); }} options={(options?.creator_categories ?? []).map((item) => [item, creatorCategoryLabel(item)])} />
+          <select aria-label="播放量口径" value={trafficBoostMode} onChange={(e) => { setTrafficBoostMode(e.target.value as TrafficBoostMode); setPostPage(1); }} style={selectStyle}>
+            <option value="original">原始播放量</option>
+            <option value="boosted_preview">7月加成后播放量</option>
+          </select>
           <label style={checkLabel}><input type="checkbox" checked={includeCrossIndustry} onChange={(e) => { setIncludeCrossIndustry(e.target.checked); setPostPage(1); }} />包含异业活动数据</label>
         </div>
 
         <div className="metric-row">
           <MetricCard label="总播放量" value={fmtInt(totalViews)} />
           <MetricCard label="投稿总数" value={fmtInt(totalPosts)} />
-          <MetricCard label="达人数" value={fmtInt(summaryRows.length)} />
+          <MetricCard label="覆盖达人" value={fmtInt(coveredCreators)} />
           <MetricCard label="统计周期" value={periodMode === "month" ? effectiveMonth : effectiveWeekStart} />
         </div>
 

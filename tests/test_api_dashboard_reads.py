@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch
 
 from api.main import create_app
+from api.dashboard import _collapse_creator_summary, _rank_unique_creator_summary
 from config.settings import Settings
 from database.dashboard_repository import DashboardRepository
 from database.db import connect
@@ -513,6 +514,112 @@ def test_invalid_traffic_boost_mode_is_rejected(tmp_path):
     )
 
     assert response.status_code == 422
+
+
+def test_creator_summary_collapses_profile_snapshots_without_changing_totals():
+    summary = pd.DataFrame(
+        [
+            {
+                "creator_key": "creator-1",
+                "user_id": "old-uid",
+                "creator_label": "Creator One",
+                "creator_category": "GRASSROOT",
+                "contract_types": "TT",
+                "follower_count": 1000,
+                "source_files": "a.xlsx",
+                "source_platforms": "TikTok",
+                "post_count": 2,
+                "total_views": 200,
+                "average_views": 100,
+                "max_views": 150,
+                "total_likes": 10,
+                "total_comments": 2,
+                "total_reposts": 1,
+                "total_collects": 1,
+                "total_interactions": 14,
+                "engagement_rate": 0.07,
+                "earliest_date": "2026-07-01",
+                "latest_date": "2026-07-10",
+            },
+            {
+                "creator_key": "creator-1",
+                "user_id": "new-uid",
+                "creator_label": "Creator One",
+                "creator_category": "GRASSROOT",
+                "contract_types": "YTB",
+                "follower_count": 1200,
+                "source_files": "b.xlsx",
+                "source_platforms": "YouTube",
+                "post_count": 1,
+                "total_views": 300,
+                "average_views": 300,
+                "max_views": 300,
+                "total_likes": 20,
+                "total_comments": 3,
+                "total_reposts": 2,
+                "total_collects": 2,
+                "total_interactions": 27,
+                "engagement_rate": 0.09,
+                "earliest_date": "2026-07-20",
+                "latest_date": "2026-07-20",
+            },
+        ]
+    )
+
+    collapsed = _collapse_creator_summary(summary)
+
+    assert len(collapsed) == 1
+    row = collapsed.iloc[0]
+    assert row["post_count"] == 3
+    assert row["total_views"] == 500
+    assert row["total_interactions"] == 41
+    assert row["user_id"] == "new-uid"
+    assert row["contract_types"] == "TT、YTB"
+
+
+def test_creator_ranking_collapses_profile_snapshots_before_ranking():
+    data = pd.DataFrame(
+        [
+            {
+                "creator_key": "creator-1",
+                "user_id": "old-uid",
+                "creator_label": "Creator One",
+                "creator_category": "GRASSROOT",
+                "contract_types": "TT",
+                "follower_count": 1000,
+                "source_file": "a.xlsx",
+                "source_platform": "TikTok",
+                "views": 200,
+                "likes": 10,
+                "comment": 2,
+                "reposted": 1,
+                "collect": 1,
+                "publish_date": "2026-07-10",
+            },
+            {
+                "creator_key": "creator-1",
+                "user_id": "new-uid",
+                "creator_label": "Creator One",
+                "creator_category": "GRASSROOT",
+                "contract_types": "YTB",
+                "follower_count": 1200,
+                "source_file": "b.xlsx",
+                "source_platform": "YouTube",
+                "views": 300,
+                "likes": 20,
+                "comment": 3,
+                "reposted": 2,
+                "collect": 2,
+                "publish_date": "2026-07-20",
+            },
+        ]
+    )
+
+    ranked = _rank_unique_creator_summary(data, "total_views", limit=10)
+
+    assert len(ranked) == 1
+    assert ranked.iloc[0]["post_count"] == 2
+    assert ranked.iloc[0]["total_views"] == 500
 
 
 def test_posts_api_preserves_complete_monthly_detail_fields(tmp_path):

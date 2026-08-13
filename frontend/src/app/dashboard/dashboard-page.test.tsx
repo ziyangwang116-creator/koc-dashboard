@@ -61,10 +61,18 @@ vi.mock("@/lib/endpoints", () => ({
 }));
 
 import DashboardPage from "@/app/dashboard/page";
+import { dashboardApi } from "@/lib/endpoints";
 
 describe("DashboardPage", () => {
   it("renders filter options and summary rows once data resolves", async () => {
     renderWithQueryClient(<DashboardPage />);
+
+    expect(screen.getByRole("combobox", { name: "播放量口径" })).toHaveValue("original");
+    await waitFor(() =>
+      expect(dashboardApi.summary).toHaveBeenCalledWith(
+        expect.objectContaining({ traffic_boost_mode: "original" })
+      )
+    );
 
     await waitFor(() => expect(screen.getByText("达人一")).toBeInTheDocument());
     expect(screen.getByText("数据看板")).toBeInTheDocument();

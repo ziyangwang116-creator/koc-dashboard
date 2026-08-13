@@ -21,9 +21,7 @@ from database.db import connect, init_db
 from database.koc_repository import KOCRepository
 from ui.dashboard import (
     _platform_posts,
-    _platform_top_ranking,
     _platform_video_top_ranking,
-    _rank_creator_summary,
 )
 
 from api.dashboard_support import (
@@ -256,6 +254,95 @@ def _serialize_post_row(row: pd.Series) -> dict:
     }
 
 
+def _unique_text(values) -> str:
+    unique: list[str] = []
+    for value in values:
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            continue
+        for part in str(value).replace(",", "、").split("、"):
+            text = part.strip()
+            if text and text not in unique:
+                unique.append(text)
+    return "、".join(unique)
+
+
+def _collapse_creator_summary(summary: pd.DataFrame) -> pd.DataFrame:
+    """Return one summary row per creator without changing post-level totals.
+
+    A creator can have multiple effective profile or contract snapshots inside
+    one reporting period. ``build_creator_summary`` intentionally preserves
+    those snapshots, but the dashboard creator count and creator table require
+    one row per creator. Consolidate only the presentation summary; persisted
+    posts and historical snapshots remain untouched.
+    """
+    if summary.empty or "creator_key" not in summary.columns:
+        return summary.copy()
+
+    rows: list[dict] = []
+    for creator_key, group in summary.groupby("creator_key", dropna=False, sort=False):
+        ordered = group.copy()
+        ordered["_latest_sort"] = pd.to_datetime(
+            ordered.get("latest_date"), errors="coerce"
+        )
+        ordered = ordered.sort_values("_latest_sort", kind="stable", na_position="first")
+        latest = ordered.iloc[-1]
+
+        post_count = int(pd.to_numeric(group["post_count"], errors="coerce").fillna(0).sum())
+        total_views = int(pd.to_numeric(group["total_views"], errors="coerce").fillna(0).sum())
+        total_interactions = int(
+            pd.to_numeric(group["total_interactions"], errors="coerce").fillna(0).sum()
+        )
+        earliest = pd.to_datetime(group["earliest_date"], errors="coerce").min()
+        latest_date = pd.to_datetime(group["latest_date"], errors="coerce").max()
+
+        rows.append(
+            {
+                "creator_key": creator_key,
+                "user_id": latest.get("user_id"),
+                "creator_label": latest.get("creator_label"),
+                "creator_category": latest.get("creator_category"),
+                "_creator_category_value": latest.get("creator_category"),
+                "contract_types": _unique_text(group["contract_types"]),
+                "follower_count": latest.get("follower_count"),
+                "source_files": _unique_text(group["source_files"]),
+                "source_platforms": _unique_text(group["source_platforms"]),
+                "post_count": post_count,
+                "total_views": total_views,
+                "average_views": total_views / post_count if post_count else 0,
+                "max_views": pd.to_numeric(group["max_views"], errors="coerce").fillna(0).max(),
+                "total_likes": pd.to_numeric(group["total_likes"], errors="coerce").fillna(0).sum(),
+                "total_comments": pd.to_numeric(group["total_comments"], errors="coerce").fillna(0).sum(),
+                "total_reposts": pd.to_numeric(group["total_reposts"], errors="coerce").fillna(0).sum(),
+                "total_collects": pd.to_numeric(group["total_collects"], errors="coerce").fillna(0).sum(),
+                "total_interactions": total_interactions,
+                "engagement_rate": total_interactions / total_views if total_views else 0.0,
+                "earliest_date": None if pd.isna(earliest) else earliest.date(),
+                "latest_date": None if pd.isna(latest_date) else latest_date.date(),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _rank_unique_creator_summary(
+    data: pd.DataFrame,
+    metric: str,
+    *,
+    limit: int,
+    creator_records=None,
+) -> pd.DataFrame:
+    summary = _collapse_creator_summary(
+        build_creator_summary(data, creator_records)
+    )
+    if summary.empty:
+        return summary
+    tie_breaker = "total_views" if metric == "post_count" else "post_count"
+    return summary.sort_values(
+        [metric, tie_breaker, "creator_label"],
+        ascending=[False, False, True],
+        kind="stable",
+    ).head(limit).reset_index(drop=True)
+
+
 def _filter_creator_records(creator_records, creator_key, creator_category):
     category_keys = creator_keys_for_categories(creator_category, creator_records)
     if creator_key:
@@ -301,7 +388,9 @@ class ComparisonRequest(BaseModel):
 
 def _group_metric_table(data: pd.DataFrame, dimension: str, creator_records) -> pd.DataFrame:
     if dimension == "creator":
-        table = build_creator_summary(data, creator_records)
+        table = _collapse_creator_summary(
+            build_creator_summary(data, creator_records)
+        )
         if table.empty:
             return pd.DataFrame(columns=["group_key", "group_label", "total_views", "post_count", "engagement_rate"])
         table = table.rename(columns={"creator_key": "group_key", "creator_label": "group_label"})
@@ -478,7 +567,9 @@ def build_dashboard_router(*, database_path, require_session: Callable) -> APIRo
         )
 
         roster = _filter_creator_records(creator_records, creator_key, creator_category)
-        creator_summary = build_creator_summary(data, roster)
+        creator_summary = _collapse_creator_summary(
+            build_creator_summary(data, roster)
+        )
         if not creator_summary.empty:
             creator_summary = _attach_creator_category(creator_summary, creator_records)
             view_sums = view_sum_columns(data, "creator_key")
@@ -706,7 +797,12 @@ def build_dashboard_router(*, database_path, require_session: Callable) -> APIRo
 
         if ranking_type in ("creator_views_top10", "creator_posts_top10"):
             metric = "total_views" if ranking_type == "creator_views_top10" else "post_count"
-            ranked = _rank_creator_summary(data, metric, limit=10, creator_records=creator_records)
+            ranked = _rank_unique_creator_summary(
+                data,
+                metric,
+                limit=10,
+                creator_records=creator_records,
+            )
             items = [
                 {
                     "rank": index + 1,
@@ -720,7 +816,11 @@ def build_dashboard_router(*, database_path, require_session: Callable) -> APIRo
             ]
         elif ranking_type in ("creator_ytb_top30", "creator_tt_top30"):
             platform = "ytb" if ranking_type == "creator_ytb_top30" else "tt"
-            ranked = _platform_top_ranking(data, platform, "total_views")
+            ranked = _rank_unique_creator_summary(
+                _platform_posts(data, platform),
+                "total_views",
+                limit=30,
+            )
             items = [
                 {
                     "rank": index + 1,
