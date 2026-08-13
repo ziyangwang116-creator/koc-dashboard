@@ -183,6 +183,18 @@ def test_posts_requires_authentication(tmp_path):
     assert response.status_code == 401
 
 
+def test_daily_requires_authentication(tmp_path):
+    database_path = tmp_path / "koc.db"
+    app = create_app(_settings(database_path), environment="development")
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/dashboard/daily", params={"period_mode": "month", "period_month": "2026-07"}
+    )
+
+    assert response.status_code == 401
+
+
 def test_comparison_requires_authentication(tmp_path):
     database_path = tmp_path / "koc.db"
     app = create_app(_settings(database_path), environment="development")
@@ -251,6 +263,34 @@ def test_summary_month_period_returns_creator_rows(tmp_path):
     assert creator_keys == {grassroot.user_id, long_term.user_id}
     for row in active_rows:
         assert "view" in row and "original_views" in row and "traffic_boost_views" in row and "boosted_views" in row
+
+
+def test_daily_returns_complete_period_instead_of_posts_first_page(tmp_path):
+    database_path = tmp_path / "koc.db"
+    grassroot, long_term = _seed_creators(database_path)
+    _seed_posts(database_path, grassroot, long_term)
+    client = _authenticated_client(database_path)
+
+    response = client.get(
+        "/api/dashboard/daily",
+        params={"period_mode": "month", "period_month": "2026-07"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == [
+        {
+            "publish_date": "2026-07-01",
+            "post_count": 1,
+            "total_views": 100,
+            "total_interactions": 11,
+        },
+        {
+            "publish_date": "2026-07-15",
+            "post_count": 1,
+            "total_views": 200,
+            "total_interactions": 22,
+        },
+    ]
 
 
 def test_summary_week_period_requires_monday_week_start(tmp_path):

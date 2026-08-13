@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from core.dashboard_processor import (
     build_creator_summary,
+    build_daily_summary,
     build_dashboard_result,
     build_dimension_summary,
     enrich_dashboard_creator_metadata,
@@ -676,6 +677,45 @@ def build_dashboard_router(*, database_path, require_session: Callable) -> APIRo
                 }
             },
         }
+
+    @router.get("/api/dashboard/daily")
+    def daily(
+        period_mode: str | None = Query(default=None),
+        period_month: str | None = Query(default=None),
+        week_start: str | None = Query(default=None),
+        start_date: str | None = Query(default=None),
+        end_date: str | None = Query(default=None),
+        creator_key: list[str] | None = Query(default=None),
+        creator_category: list[str] | None = Query(default=None),
+        source_platform: list[str] | None = Query(default=None),
+        content_type: list[str] | None = Query(default=None),
+        include_cross_industry: bool = Query(default=False),
+        traffic_boost_mode: str = Query(default="saved_setting"),
+    ) -> dict:
+        data, _creator_records = _scoped_data(
+            period_mode=period_mode,
+            period_month=period_month,
+            week_start=week_start,
+            start_date=start_date,
+            end_date=end_date,
+            creator_key=creator_key,
+            creator_category=creator_category,
+            source_platform=source_platform,
+            content_type=content_type,
+            include_cross_industry=include_cross_industry,
+            traffic_boost_mode=traffic_boost_mode,
+        )
+        daily_summary = build_daily_summary(data)
+        rows = [
+            {
+                "publish_date": _date_str(row.get("publish_date")),
+                "post_count": int(row.get("post_count") or 0),
+                "total_views": int(row.get("total_views") or 0),
+                "total_interactions": int(row.get("total_interactions") or 0),
+            }
+            for _, row in daily_summary.iterrows()
+        ]
+        return {"data": rows}
 
     @router.post("/api/dashboard/comparison")
     def comparison(payload: ComparisonRequest) -> dict:

@@ -5,6 +5,7 @@ import type {
   ContractRevision,
   FilterOptions,
   DashboardSummaryRow,
+  DashboardDailyRow,
   DashboardPostRow,
   ComparisonResult,
   RankingCreatorItem,
@@ -103,6 +104,8 @@ export const dashboardApi = {
   filterOptions: () => apiClient.get<{ data: FilterOptions }>("/dashboard/filter-options"),
   summary: (params: Record<string, unknown>) =>
     apiClient.get<Envelope<DashboardSummaryRow[]>>("/dashboard/summary", params),
+  daily: (params: Record<string, unknown>) =>
+    apiClient.get<{ data: DashboardDailyRow[] }>("/dashboard/daily", params),
   posts: (params: Record<string, unknown>) =>
     apiClient.get<Envelope<DashboardPostRow[]>>("/dashboard/posts", params),
   comparison: (body: unknown) =>

@@ -118,6 +118,13 @@ export interface DashboardSummaryRow {
   latest_date: string;
 }
 
+export interface DashboardDailyRow {
+  publish_date: string;
+  post_count: number;
+  total_views: number;
+  total_interactions: number;
+}
+
 export interface DashboardPostRow {
   source_file: string | null;
   creator_key: string;

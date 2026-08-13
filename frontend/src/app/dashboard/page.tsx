@@ -114,6 +114,11 @@ export default function DashboardPage() {
     queryFn: () => dashboardApi.posts({ ...periodParams, ...commonFilters, page: postPage, page_size: 100 }),
     enabled: canQuery,
   });
+  const dailyQuery = useQuery({
+    queryKey: ["dashboard", "daily", periodParams, commonFilters],
+    queryFn: () => dashboardApi.daily({ ...periodParams, ...commonFilters }),
+    enabled: canQuery,
+  });
 
   const rankingQuery = (rankingType: string) => ({
     queryKey: ["dashboard", "rankings", rankingType, periodParams, commonFilters],
@@ -160,17 +165,11 @@ export default function DashboardPage() {
   ).size;
   const trendData = useMemo(
     () =>
-      postRows
-        .slice()
-        .sort((a, b) => (a.publish_date ?? "").localeCompare(b.publish_date ?? ""))
-        .reduce<{ date: string; views: number }[]>((rows, post) => {
-          const date = post.publish_date ?? "未知日期";
-          const existing = rows.find((row) => row.date === date);
-          if (existing) existing.views += post.views;
-          else rows.push({ date, views: post.views });
-          return rows;
-        }, []),
-    [postRows]
+      (dailyQuery.data?.data ?? []).map((row) => ({
+        date: row.publish_date,
+        views: row.total_views,
+      })),
+    [dailyQuery.data]
   );
 
   const summaryColumns: Column<DashboardSummaryRow>[] = [
@@ -232,8 +231,8 @@ export default function DashboardPage() {
           <MetricCard label="统计周期" value={periodMode === "month" ? effectiveMonth : effectiveWeekStart} />
         </div>
 
-        <Panel title="播放量趋势（当前明细页）">
-          <StateShell isLoading={postsQuery.isLoading} isError={postsQuery.isError} isUnauthorized={postsQuery.error instanceof ApiError && postsQuery.error.status === 401} isEmpty={trendData.length === 0}>
+        <Panel title="播放量趋势（完整统计周期）">
+          <StateShell isLoading={dailyQuery.isLoading} isError={dailyQuery.isError} isUnauthorized={dailyQuery.error instanceof ApiError && dailyQuery.error.status === 401} isEmpty={trendData.length === 0}>
             <ResponsiveContainer width="100%" height={240}><LineChart data={trendData}><CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" /><XAxis dataKey="date" tick={{ fontSize: 11 }} /><YAxis tick={{ fontSize: 11 }} /><Tooltip /><Line type="monotone" dataKey="views" stroke="var(--color-primary)" strokeWidth={2} dot={false} /></LineChart></ResponsiveContainer>
           </StateShell>
         </Panel>

@@ -45,6 +45,7 @@ const summary = {
 };
 
 const posts = { data: [], meta: { request_id: "r1", pagination: { page: 1, page_size: 20, total_items: 0, total_pages: 1 } } };
+const daily = { data: [{ publish_date: "2026-07-01", post_count: 1, total_views: 10000, total_interactions: 110 }] };
 const rankings = { data: { ranking_type: "creator_views_top10", items: [] } };
 const importBatches = { data: [] };
 
@@ -52,6 +53,7 @@ vi.mock("@/lib/endpoints", () => ({
   dashboardApi: {
     filterOptions: vi.fn(async () => filterOptions),
     summary: vi.fn(async () => summary),
+    daily: vi.fn(async () => daily),
     posts: vi.fn(async () => posts),
     rankings: vi.fn(async () => rankings),
     importBatches: vi.fn(async () => importBatches),
