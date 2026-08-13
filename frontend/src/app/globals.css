@@ -238,13 +238,205 @@ textarea {
 }
 
 .agent-message-content {
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
   padding: 11px 13px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius);
   background: #f8fafb;
   line-height: 1.65;
+}
+
+.agent-markdown > :first-child {
+  margin-top: 0;
+}
+
+.agent-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.agent-markdown h1,
+.agent-markdown h2,
+.agent-markdown h3,
+.agent-markdown h4 {
+  margin: 18px 0 8px;
+  line-height: 1.35;
+}
+
+.agent-markdown h1 { font-size: 19px; }
+.agent-markdown h2 { font-size: 17px; }
+.agent-markdown h3 { font-size: 15px; }
+.agent-markdown h4 { font-size: 14px; }
+
+.agent-markdown p,
+.agent-markdown ul,
+.agent-markdown ol,
+.agent-markdown blockquote,
+.agent-markdown table {
+  margin: 8px 0;
+}
+
+.agent-markdown ul,
+.agent-markdown ol {
+  padding-left: 22px;
+}
+
+.agent-markdown li + li {
+  margin-top: 4px;
+}
+
+.agent-markdown strong {
+  font-weight: 700;
+}
+
+.agent-markdown code {
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: #e9eef1;
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 0.92em;
+}
+
+.agent-markdown pre {
+  margin: 10px 0;
+  padding: 11px;
+  overflow-x: auto;
+  border-radius: var(--radius);
+  background: #1f2933;
+  color: #f8fafb;
+}
+
+.agent-markdown pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.agent-markdown blockquote {
+  padding-left: 10px;
+  border-left: 3px solid var(--color-primary);
+  color: var(--color-text-muted);
+}
+
+.agent-markdown table {
+  display: block;
+  width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+}
+
+.agent-markdown th,
+.agent-markdown td {
+  min-width: 96px;
+  padding: 7px 9px;
+  border-right: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.agent-markdown th {
+  background: #eef3f5;
+  font-weight: 650;
+}
+
+.agent-visualization-shell {
+  margin-top: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+}
+
+.agent-visualization-export {
+  padding: 13px;
+  background: #ffffff;
+}
+
+.agent-visualization-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.agent-visualization-header h3 {
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.agent-visualization-header p,
+.agent-chart-source {
+  margin-top: 3px;
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
+.agent-chart-download {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+  color: var(--color-primary-dark);
+}
+
+.agent-chart-canvas {
+  width: 100%;
+  height: 280px;
+  margin-top: 12px;
+}
+
+.agent-chart-changes {
+  margin-top: 8px;
+  border-top: 1px solid var(--color-border);
+}
+
+.agent-chart-changes > div {
+  display: grid;
+  grid-template-columns: minmax(100px, 1fr) repeat(3, minmax(72px, auto));
+  gap: 10px;
+  padding: 7px 3px;
+  border-bottom: 1px solid #edf0f2;
+  color: var(--color-text-muted);
+  font-size: 11.5px;
+}
+
+.agent-chart-changes strong {
+  color: var(--color-text);
+}
+
+.agent-chart-change-danger,
+.agent-chart-change-danger strong {
+  color: var(--color-danger) !important;
+  background: var(--color-danger-bg);
+}
+
+.agent-chart-warnings {
+  margin-top: 9px;
+  padding: 8px 9px;
+  border-radius: var(--radius);
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+  font-size: 12px;
+}
+
+.agent-chart-warnings > div {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.agent-chart-warnings svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.agent-chart-export-error {
+  padding: 0 13px 10px;
+  color: var(--color-danger);
+  font-size: 12px;
 }
 
 .agent-message-user .agent-message-content {
@@ -432,6 +624,12 @@ textarea {
   }
   .agent-evidence-row {
     grid-template-columns: 1fr;
+  }
+  .agent-chart-canvas {
+    height: 240px;
+  }
+  .agent-chart-changes > div {
+    grid-template-columns: 1fr 1fr;
   }
 }
 

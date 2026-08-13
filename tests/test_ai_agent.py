@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from ai.tools import AIToolRegistry
+from ai.visualizations import build_tool_visualizations, sanitize_visualizations
 from database.ai_repository import AIRepository
 from database.dashboard_repository import DashboardRepository
 from database.db import connect, init_db
@@ -149,6 +150,125 @@ def test_read_only_tools_use_creator_database_and_persisted_versions(tmp_path):
     assert compensation["settlements"][0]["details"]["rank"] == "D"
 
 
+def test_month_comparison_visualizations_use_only_tool_result_values():
+    result = {
+        "status": "ok",
+        "creator": {"creator_id": 7, "koc_name": "白黑女神"},
+        "current_month": "2026-07",
+        "baseline_month": "2026-06",
+        "current": {
+            "post_count": 38,
+            "views": 77307,
+            "by_subtype": [
+                {"subtype": "long", "post_count": 3, "views": 62969},
+                {"subtype": "YTB shorts", "post_count": 3, "views": 10294},
+                {"subtype": "livestream", "post_count": 32, "views": 4044},
+            ],
+        },
+        "baseline": {
+            "post_count": 31,
+            "views": 26249,
+            "by_subtype": [
+                {"subtype": "long", "post_count": 0, "views": 0},
+                {"subtype": "shorts", "post_count": 1, "views": 1659},
+                {"subtype": "livestream", "post_count": 30, "views": 24590},
+            ],
+        },
+    }
+
+    charts = build_tool_visualizations("compare_creator_months", result)
+
+    assert len(charts) == 4
+    assert charts[0]["data"] == [
+        {
+            "category": "投稿数量",
+            "baseline": 31,
+            "current": 38,
+            "change": 7,
+            "change_rate": round(7 / 31, 6),
+            "decline_over_30_percent": False,
+        }
+    ]
+    subtype_views = charts[3]["data"]
+    assert subtype_views == [
+        {
+            "category": "long",
+            "baseline": 0,
+            "current": 62969,
+            "change": 62969,
+            "change_rate": None,
+            "decline_over_30_percent": False,
+        },
+        {
+            "category": "shorts",
+            "baseline": 1659,
+            "current": 10294,
+            "change": 8635,
+            "change_rate": round(8635 / 1659, 6),
+            "decline_over_30_percent": False,
+        },
+        {
+            "category": "livestream",
+            "baseline": 24590,
+            "current": 4044,
+            "change": -20546,
+            "change_rate": round(-20546 / 24590, 6),
+            "decline_over_30_percent": True,
+        },
+    ]
+    assert subtype_views[-1]["decline_over_30_percent"] is True
+    assert charts[3]["warnings"][0]["level"] == "danger"
+    assert charts[3]["source"]["database_backed"] is True
+
+
+def test_visualization_sanitizer_rejects_model_authored_or_invalid_payloads():
+    unsafe = {
+        "kind": "grouped_bar",
+        "id": "<script>alert(1)</script>",
+        "title": "fake",
+        "series": [
+            {"key": "baseline", "label": "A", "color": "#000"},
+            {"key": "current", "label": "B", "color": "#111"},
+        ],
+        "data": [{"category": "x", "baseline": 1, "current": 2}],
+        "source": {"tool": "model_output", "database_backed": False},
+    }
+
+    assert sanitize_visualizations([unsafe]) == []
+
+
+def test_visualization_sanitizer_recalculates_derived_values_from_database_values():
+    chart = build_tool_visualizations(
+        "compare_creator_months",
+        {
+            "status": "ok",
+            "creator": {"creator_id": 7, "koc_name": "白黑女神"},
+            "current_month": "2026-07",
+            "baseline_month": "2026-06",
+            "current": {"post_count": 7, "views": 700, "by_subtype": []},
+            "baseline": {"post_count": 10, "views": 1000, "by_subtype": []},
+        },
+    )[0]
+    chart["data"][0].update(
+        {
+            "change": 999,
+            "change_rate": 99,
+            "decline_over_30_percent": True,
+        }
+    )
+
+    sanitized = sanitize_visualizations([chart])
+
+    assert sanitized[0]["data"][0] == {
+        "category": "投稿数量",
+        "baseline": 10,
+        "current": 7,
+        "change": -3,
+        "change_rate": -0.3,
+        "decline_over_30_percent": False,
+    }
+
+
 class _FakeResponses:
     def __init__(self):
         self.calls = []
@@ -230,6 +350,51 @@ class _FakeChatCompletions:
         )
 
 
+class _FakeComparisonChatCompletions:
+    def __init__(self):
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if len(self.calls) == 1:
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=None,
+                            tool_calls=[
+                                SimpleNamespace(
+                                    id="compare-1",
+                                    function=SimpleNamespace(
+                                        name="compare_creator_months",
+                                        arguments=json.dumps(
+                                            {
+                                                "query": "AI测试达人",
+                                                "current_month": "2026-07",
+                                                "baseline_month": "2026-06",
+                                                "include_cross_industry": False,
+                                            },
+                                            ensure_ascii=False,
+                                        ),
+                                    ),
+                                )
+                            ],
+                        )
+                    )
+                ]
+            )
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="## 月度对比\n\n7 月播放量低于 6 月。",
+                        tool_calls=[],
+                    )
+                )
+            ]
+        )
+
+
 def test_agent_service_executes_tools_and_writes_sanitized_audit(tmp_path):
     database_path = tmp_path / "ai.db"
     _seed_ai_database(database_path)
@@ -291,6 +456,36 @@ def test_deepseek_agent_uses_chat_completions_tool_loop(tmp_path):
     assert fake_chat.calls[0]["tool_choice"] == "auto"
     assert fake_chat.calls[0]["tools"][0]["type"] == "function"
     assert any(item["role"] == "tool" for item in fake_chat.calls[1]["messages"])
+
+
+def test_agent_persists_database_backed_comparison_visualizations(tmp_path):
+    database_path = tmp_path / "ai.db"
+    _seed_ai_database(database_path)
+    fake_chat = _FakeComparisonChatCompletions()
+    service = AIAgentService(
+        database_path,
+        api_key=None,
+        model="deepseek-chat",
+        provider="deepseek",
+        client=SimpleNamespace(chat=SimpleNamespace(completions=fake_chat)),
+    )
+
+    response = service.ask(
+        conversation_id="comparison-conversation",
+        session_id="session-1",
+        message="比较 AI测试达人 2026-06 和 2026-07",
+    )
+
+    assert len(response.visualizations) == 4
+    assert response.visualizations[0]["source"]["tool"] == "compare_creator_months"
+    assert response.visualizations[1]["data"][0]["baseline"] == 2000
+    assert response.visualizations[1]["data"][0]["current"] == 1000
+    stored = AIRepository(database_path).list_messages("comparison-conversation")
+    assistant = stored[-1]
+    assert len(assistant["metadata"]["visualizations"]) == 4
+    assert assistant["metadata"]["visualizations"][1]["data"][0][
+        "decline_over_30_percent"
+    ] is True
 
 
 def test_agent_service_surfaces_wrapped_rate_limit_errors(tmp_path):

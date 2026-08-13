@@ -25,12 +25,32 @@ const mocks = vi.hoisted(() => ({
   sendMessage: vi.fn(async () => ({
     data: {
       conversation_id: "32ee0527-bbc5-4392-965d-bd28ef2751ed",
-      answer: "7 月共有 3021 条投稿。",
+      answer: "## 7 月分析\n\n**结论：** 投稿增长。\n\n| 指标 | 数值 |\n|---|---:|\n| 投稿 | 3021 |",
       tool_calls: [
         {
           tool_name: "audit_month_data",
           summary: { status: "ok", post_count: 3021 },
           duration_ms: 12,
+        },
+      ],
+      visualizations: [
+        {
+          schema_version: 1,
+          id: "creator-1-posts",
+          kind: "grouped_bar",
+          title: "白黑女神 投稿数量对比",
+          subtitle: "2026-06 vs 2026-07",
+          category_key: "category",
+          value_format: "integer",
+          series: [
+            { key: "baseline", label: "2026-06", color: "#64748b" },
+            { key: "current", label: "2026-07", color: "#0f9b9b" },
+          ],
+          data: [
+            { category: "投稿数量", baseline: 31, current: 38, change: 7, change_rate: 0.225806, decline_over_30_percent: false },
+          ],
+          warnings: [],
+          source: { tool: "compare_creator_months", database_backed: true, creator_id: 1, creator_name: "白黑女神", periods: ["2026-06", "2026-07"] },
         },
       ],
     },
@@ -80,7 +100,10 @@ describe("AgentPage", () => {
         "审计 2026-07 数据"
       )
     );
-    expect(await screen.findByText("7 月共有 3021 条投稿。")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "7 月分析" })).toBeInTheDocument();
+    expect(screen.getByRole("table")).toBeInTheDocument();
+    expect(screen.getByText("白黑女神 投稿数量对比")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "下载 白黑女神 投稿数量对比 PNG" })).toBeInTheDocument();
     await user.click(screen.getByText("查询依据"));
     expect(screen.getByText("audit_month_data")).toBeInTheDocument();
   });

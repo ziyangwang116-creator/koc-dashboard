@@ -9,6 +9,7 @@ from typing import Any
 from ai.prompts import SYSTEM_PROMPT
 from ai.schemas import OPENAI_TOOLS
 from ai.tools import AIToolError, AIToolRegistry
+from ai.visualizations import build_tool_visualizations, sanitize_visualizations
 from database.ai_repository import AIRepository
 
 try:
@@ -25,6 +26,7 @@ class AIAgentServiceError(RuntimeError):
 class AIAgentResponse:
     answer: str
     tool_calls: tuple[dict[str, Any], ...]
+    visualizations: tuple[dict[str, Any], ...] = ()
 
 
 def _item_value(item: Any, name: str, default: Any = None) -> Any:
@@ -207,6 +209,15 @@ class AIAgentService:
             tools.append({"type": "function", "function": function})
         return tools
 
+    @staticmethod
+    def _deduplicate_visualizations(
+        visualizations: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], ...]:
+        unique: dict[str, dict[str, Any]] = {}
+        for visualization in sanitize_visualizations(visualizations):
+            unique[visualization["id"]] = visualization
+        return tuple(unique.values())
+
     def _ask_with_chat_completions(
         self,
         *,
@@ -221,6 +232,7 @@ class AIAgentService:
             ),
         ]
         tool_audits: list[dict[str, Any]] = []
+        visualizations: list[dict[str, Any]] = []
         tools = self._chat_completion_tools()
 
         for _ in range(self.MAX_TOOL_ROUNDS + 1):
@@ -239,7 +251,11 @@ class AIAgentService:
                 answer = str(_item_value(message, "content", "") or "").strip()
                 if not answer:
                     raise AIAgentServiceError("AI 未返回可显示的回答。")
-                return AIAgentResponse(answer=answer, tool_calls=tuple(tool_audits))
+                return AIAgentResponse(
+                    answer=answer,
+                    tool_calls=tuple(tool_audits),
+                    visualizations=self._deduplicate_visualizations(visualizations),
+                )
 
             messages.append(
                 {
@@ -274,6 +290,12 @@ class AIAgentService:
                     raw_arguments=str(_item_value(function, "arguments", "{}")),
                 )
                 tool_audits.append(audit)
+                visualizations.extend(
+                    build_tool_visualizations(
+                        str(_item_value(function, "name", "")),
+                        result,
+                    )
+                )
                 messages.append(
                     {
                         "role": "tool",
@@ -320,6 +342,7 @@ class AIAgentService:
                     "provider": self.provider,
                     "model": self.model,
                     "tool_calls": len(response.tool_calls),
+                    "visualizations": list(response.visualizations),
                 },
             )
             return response
@@ -328,6 +351,7 @@ class AIAgentService:
             for item in history
         ]
         tool_audits: list[dict[str, Any]] = []
+        visualizations: list[dict[str, Any]] = []
         try:
             response = self.client.responses.create(
                 model=self.model,
@@ -355,6 +379,12 @@ class AIAgentService:
                         raw_arguments=str(_item_value(call, "arguments", "{}")),
                     )
                     tool_audits.append(audit)
+                    visualizations.extend(
+                        build_tool_visualizations(
+                            str(_item_value(call, "name", "")),
+                            result,
+                        )
+                    )
                     outputs.append(
                         {
                             "type": "function_call_output",
@@ -398,6 +428,7 @@ class AIAgentService:
         answer = str(_item_value(response, "output_text", "")).strip()
         if not answer:
             raise AIAgentServiceError("AI 未返回可显示的回答。")
+        safe_visualizations = self._deduplicate_visualizations(visualizations)
         self.repository.add_message(
             conversation_id,
             "assistant",
@@ -406,9 +437,14 @@ class AIAgentService:
                 "provider": self.provider,
                 "model": self.model,
                 "tool_calls": len(tool_audits),
+                "visualizations": list(safe_visualizations),
             },
         )
-        return AIAgentResponse(answer=answer, tool_calls=tuple(tool_audits))
+        return AIAgentResponse(
+            answer=answer,
+            tool_calls=tuple(tool_audits),
+            visualizations=safe_visualizations,
+        )
 
     def _provider_error_message(self, exc: Exception) -> str:
         status_code = _exception_status_code(exc)

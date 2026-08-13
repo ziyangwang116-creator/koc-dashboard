@@ -551,6 +551,7 @@ export interface AgentMessage {
   metadata?: Record<string, unknown>;
   created_at?: string;
   tool_calls?: AgentToolEvidence[];
+  visualizations?: AgentVisualization[];
 }
 
 export interface AgentToolEvidence {
@@ -563,4 +564,45 @@ export interface AgentReply {
   conversation_id: string;
   answer: string;
   tool_calls: AgentToolEvidence[];
+  visualizations: AgentVisualization[];
+}
+
+export interface AgentVisualizationSeries {
+  key: "baseline" | "current";
+  label: string;
+  color: string;
+}
+
+export interface AgentVisualizationRow {
+  category: string;
+  baseline: number;
+  current: number;
+  change: number;
+  change_rate: number | null;
+  decline_over_30_percent: boolean;
+}
+
+export interface AgentVisualizationWarning {
+  level: "danger";
+  message: string;
+}
+
+export interface AgentVisualization {
+  schema_version: 1;
+  id: string;
+  kind: "grouped_bar";
+  title: string;
+  subtitle: string;
+  category_key: "category";
+  value_format: "integer";
+  series: AgentVisualizationSeries[];
+  data: AgentVisualizationRow[];
+  warnings: AgentVisualizationWarning[];
+  source: {
+    tool: "compare_creator_months";
+    database_backed: true;
+    creator_id: number | null;
+    creator_name: string;
+    periods: string[];
+  };
 }

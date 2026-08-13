@@ -95,13 +95,46 @@ def test_agent_status_reports_unconfigured_provider(tmp_path):
 def test_agent_conversation_and_messages_round_trip(tmp_path):
     service = SimpleNamespace(
         ask=lambda **_kwargs: AIAgentResponse(
-            answer="7 月投稿量为 10。",
+            answer="## 7 月分析\n\n| 指标 | 数值 |\n|---|---:|\n| 投稿 | 10 |",
             tool_calls=(
                 {
                     "tool_name": "audit_month_data",
                     "arguments": {"period_month": "2026-07"},
                     "summary": {"status": "ok", "post_count": 10},
                     "duration_ms": 12,
+                },
+            ),
+            visualizations=(
+                {
+                    "schema_version": 1,
+                    "id": "creator-1-posts",
+                    "kind": "grouped_bar",
+                    "title": "达人投稿数量对比",
+                    "subtitle": "2026-06 vs 2026-07",
+                    "category_key": "category",
+                    "value_format": "integer",
+                    "series": [
+                        {"key": "baseline", "label": "2026-06", "color": "#64748b"},
+                        {"key": "current", "label": "2026-07", "color": "#0f9b9b"},
+                    ],
+                    "data": [
+                        {
+                            "category": "投稿数量",
+                            "baseline": 8,
+                            "current": 10,
+                            "change": 2,
+                            "change_rate": 0.25,
+                            "decline_over_30_percent": False,
+                        }
+                    ],
+                    "warnings": [],
+                    "source": {
+                        "tool": "compare_creator_months",
+                        "database_backed": True,
+                        "creator_id": 1,
+                        "creator_name": "达人",
+                        "periods": ["2026-06", "2026-07"],
+                    },
                 },
             ),
         )
@@ -117,7 +150,7 @@ def test_agent_conversation_and_messages_round_trip(tmp_path):
 
     assert response.status_code == 200
     body = response.json()["data"]
-    assert body["answer"] == "7 月投稿量为 10。"
+    assert body["answer"].startswith("## 7 月分析")
     assert body["tool_calls"] == [
         {
             "tool_name": "audit_month_data",
@@ -126,9 +159,57 @@ def test_agent_conversation_and_messages_round_trip(tmp_path):
         }
     ]
     assert "arguments" not in body["tool_calls"][0]
+    assert body["visualizations"][0]["source"] == {
+        "tool": "compare_creator_months",
+        "database_backed": True,
+        "creator_id": 1,
+        "creator_name": "达人",
+        "periods": ["2026-06", "2026-07"],
+    }
 
     messages = client.get(f"/api/agent/conversations/{conversation_id}/messages")
     assert messages.status_code == 200
+
+
+def test_agent_message_history_returns_only_sanitized_visualization_metadata(tmp_path):
+    from database.ai_repository import AIRepository
+
+    database_path = tmp_path / "agent.db"
+    client = _client(database_path)
+    _login(client)
+    conversation_id = _new_conversation(client)
+    repository = AIRepository(database_path)
+    repository.add_message(
+        conversation_id,
+        "assistant",
+        "历史回答",
+        metadata={
+            "secret": "must-not-leak",
+            "visualizations": [
+                {
+                    "kind": "grouped_bar",
+                    "id": "safe-chart",
+                    "title": "真实对比",
+                    "subtitle": "2026-06 vs 2026-07",
+                    "series": [
+                        {"key": "baseline", "label": "2026-06", "color": "#64748b"},
+                        {"key": "current", "label": "2026-07", "color": "#0f9b9b"},
+                    ],
+                    "data": [{"category": "投稿", "baseline": 3, "current": 2, "change": -1, "change_rate": -0.333333, "decline_over_30_percent": True}],
+                    "warnings": [{"level": "danger", "message": "投稿下降 33.3%"}],
+                    "source": {"tool": "compare_creator_months", "database_backed": True, "creator_id": 1, "creator_name": "达人", "periods": ["2026-06", "2026-07"]},
+                }
+            ],
+        },
+    )
+
+    response = client.get(f"/api/agent/conversations/{conversation_id}/messages")
+
+    assert response.status_code == 200
+    payload = response.json()["data"][-1]
+    assert "metadata" not in payload
+    assert "must-not-leak" not in response.text
+    assert payload["visualizations"][0]["data"][0]["decline_over_30_percent"] is True
 
 
 def test_agent_rejects_empty_message(tmp_path):

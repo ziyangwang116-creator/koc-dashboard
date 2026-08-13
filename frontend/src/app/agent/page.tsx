@@ -3,6 +3,9 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bot, ChevronDown, Database, Loader2, Plus, Send, ShieldCheck } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { AgentVisualization } from "@/components/AgentVisualization";
 import { AppShell } from "@/components/AppShell";
 import { ErrorState, LoadingState } from "@/components/DataStates";
 import { ApiError } from "@/lib/api-client";
@@ -79,6 +82,7 @@ export default function AgentPage() {
             role: "assistant" as const,
             content: response.data.answer,
             tool_calls: response.data.tool_calls,
+            visualizations: response.data.visualizations,
           },
         ];
         queryClient.setQueryData(
@@ -187,7 +191,14 @@ export default function AgentPage() {
                     <div className="agent-message-role">
                       {message.role === "user" ? "你" : "运营 Agent"}
                     </div>
-                    <div className="agent-message-content">{message.content}</div>
+                    <div className="agent-message-content agent-markdown">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {message.content}
+                      </ReactMarkdown>
+                    </div>
+                    {message.visualizations?.map((chart) => (
+                      <AgentVisualization key={chart.id} chart={chart} />
+                    ))}
                     {message.tool_calls && message.tool_calls.length > 0 && (
                       <details className="agent-evidence">
                         <summary><ChevronDown size={14} />查询依据</summary>

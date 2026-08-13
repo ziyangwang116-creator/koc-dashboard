@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from database.ai_repository import AIRepository
+from ai.visualizations import sanitize_visualizations
 from services.ai_agent_service import AIAgentService, AIAgentServiceError
 
 
@@ -38,6 +39,16 @@ def _conversation_id(value: str) -> str:
         return str(UUID(value))
     except (TypeError, ValueError, AttributeError) as exc:
         raise _error(404, "CONVERSATION_NOT_FOUND", "对话不存在或已过期。") from exc
+
+
+def _public_message(item: dict[str, Any]) -> dict[str, Any]:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    return {
+        "role": item.get("role"),
+        "content": item.get("content"),
+        "created_at": item.get("created_at"),
+        "visualizations": sanitize_visualizations(metadata.get("visualizations")),
+    }
 
 
 def build_agent_router(
@@ -101,11 +112,14 @@ def build_agent_router(
     ) -> dict[str, Any]:
         normalized = require_conversation(conversation_id, context["session_id"])
         return {
-            "data": repository().list_messages_for_session(
-                normalized,
-                context["session_id"],
-                limit=50,
-            )
+            "data": [
+                _public_message(item)
+                for item in repository().list_messages_for_session(
+                    normalized,
+                    context["session_id"],
+                    limit=50,
+                )
+            ]
         }
 
     @router.post("/conversations/{conversation_id}/messages")
@@ -142,11 +156,13 @@ def build_agent_router(
             }
             for item in response.tool_calls
         ]
+        visualizations = sanitize_visualizations(response.visualizations)
         return {
             "data": {
                 "conversation_id": normalized,
                 "answer": response.answer,
                 "tool_calls": evidence,
+                "visualizations": visualizations,
             }
         }
 
