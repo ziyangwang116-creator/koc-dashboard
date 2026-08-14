@@ -8,6 +8,7 @@ from core.dashboard_processor import (
     build_dashboard_result,
     build_creator_summary,
     date_bounds,
+    enrich_dashboard_creator_metadata,
     filter_dashboard_data,
 )
 from core.file_processor import UploadedExcel
@@ -301,6 +302,62 @@ def test_dashboard_content_type_labels_cover_youtube_tiktok_and_saved_legacy_row
         "tiktok",
         "livestream",
     ]
+
+
+def test_saved_legacy_rows_restore_creator_identity_from_unique_name(tmp_path):
+    repository = KOCRepository(tmp_path / "koc.db")
+    first = repository.create(
+        user_id="legacy-first",
+        koc_name="Legacy First",
+        creator_category=CreatorCategory.GRASSROOT,
+        contract_types=["YTB"],
+    )
+    second = repository.create(
+        user_id="legacy-second",
+        koc_name="Legacy Second",
+        creator_category=CreatorCategory.GRASSROOT,
+        contract_types=["TT"],
+    )
+    legacy = pd.DataFrame(
+        [
+            {
+                "koc_name": first.koc_name,
+                "platform": "long",
+                "publish_date": "2026-05-01",
+                "url": "https://youtube.example/legacy-first",
+                "views": 100,
+                "likes": 10,
+                "comment": 1,
+                "reposted": 0,
+            },
+            {
+                "koc_name": second.koc_name,
+                "platform": "TikTok",
+                "publish_date": "2026-05-02",
+                "url": "https://tiktok.example/legacy-second",
+                "views": 200,
+                "likes": 20,
+                "comment": 2,
+                "reposted": 0,
+            },
+        ]
+    )
+
+    normalized = build_dashboard_result(legacy).data
+    enriched = enrich_dashboard_creator_metadata(
+        normalized,
+        repository.list(include_inactive=True),
+        repository.list_profile_history(),
+    )
+    summary = build_creator_summary(enriched)
+
+    assert enriched["creator_key"].tolist() == [first.user_id, second.user_id]
+    assert enriched["creator_label"].tolist() == [first.koc_name, second.koc_name]
+    assert enriched["source_platform"].tolist() == ["YouTube", "TikTok"]
+    assert enriched["content_type"].tolist() == ["long", "tiktok"]
+    assert summary["post_count"].sum() == 2
+    assert summary["total_views"].sum() == 300
+    assert summary["creator_key"].nunique() == 2
 
 
 def test_creator_query_filters_name_and_uid(tmp_path):

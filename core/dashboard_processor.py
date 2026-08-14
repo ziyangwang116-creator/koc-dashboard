@@ -153,6 +153,52 @@ def _dashboard_text_series(data: pd.DataFrame, column: str) -> pd.Series:
     return data[column].astype("string").str.strip()
 
 
+def _normalize_legacy_dashboard_columns(data: pd.DataFrame) -> pd.DataFrame:
+    """Restore canonical fields that were omitted by early dashboard exports."""
+    if data.empty:
+        return data.copy()
+
+    normalized = data.copy()
+    legacy_platform = _dashboard_text_series(normalized, "platform")
+    legacy_kind = legacy_platform.str.casefold()
+
+    source_platform = _dashboard_text_series(normalized, "source_platform")
+    inferred_source = pd.Series(pd.NA, index=normalized.index, dtype="string")
+    inferred_source.loc[legacy_kind.eq("tiktok")] = "TikTok"
+    inferred_source.loc[
+        legacy_kind.isin(
+            ["short", "shorts", "ytb shorts", "long", "livestream", "live"]
+        )
+    ] = "YouTube"
+    normalized["source_platform"] = source_platform.mask(
+        source_platform.isna() | source_platform.eq(""), inferred_source
+    )
+
+    inferred_content_type = legacy_kind.map(
+        {
+            "short": "YTB shorts",
+            "shorts": "YTB shorts",
+            "ytb shorts": "YTB shorts",
+            "tiktok": "tiktok",
+            "long": "long",
+            "livestream": "livestream",
+            "live": "livestream",
+        }
+    )
+    for column in ("content_type", "subtype"):
+        current = _dashboard_text_series(normalized, column)
+        normalized[column] = current.mask(
+            current.isna() | current.eq(""), inferred_content_type
+        )
+
+    legacy_name = _dashboard_text_series(normalized, "koc_name")
+    kol_name = _dashboard_text_series(normalized, "kol_name")
+    normalized["kol_name"] = kol_name.mask(
+        kol_name.isna() | kol_name.eq(""), legacy_name
+    )
+    return normalized
+
+
 def normalize_dashboard_content_types(data: pd.DataFrame) -> pd.DataFrame:
     """Apply the dashboard content-type labels to new and legacy post data.
 
@@ -576,7 +622,9 @@ def build_dashboard_result(
     data: pd.DataFrame,
     file_reports: pd.DataFrame | None = None,
 ) -> DashboardResult:
-    normalized = data.reindex(columns=DASHBOARD_DETAIL_COLUMNS).copy()
+    normalized = _normalize_legacy_dashboard_columns(data).reindex(
+        columns=DASHBOARD_DETAIL_COLUMNS
+    ).copy()
     normalized = normalize_dashboard_content_types(normalized)
     if not normalized.empty:
         normalized["publish_date"] = pd.to_datetime(
@@ -634,6 +682,12 @@ def enrich_dashboard_creator_metadata(
         else:
             enriched[column] = enriched[column].astype("object")
     for column in (
+        "user_id",
+        "creator_key",
+        "koc_name",
+        "creator_label",
+        "creator_category",
+        "contract_types",
         "creator_active",
         "profile_effective_date",
         "profile_status",
@@ -647,9 +701,22 @@ def enrich_dashboard_creator_metadata(
     for record in creator_records:
         for alias in _creator_user_ids(record):
             creator_id_by_user_id.setdefault(alias, record.id)
+    creator_ids_by_name: dict[str, set[int]] = {}
+
+    def register_creator_name(value: object, creator_id: int) -> None:
+        if value is None or pd.isna(value):
+            return
+        name = str(value).strip().casefold()
+        if name:
+            creator_ids_by_name.setdefault(name, set()).add(creator_id)
+
+    for record in creator_records:
+        register_creator_name(record.koc_name, record.id)
+
     history_by_creator_id: dict[int, list[CreatorProfileSnapshot]] = {}
     for snapshot in profile_history:
         history_by_creator_id.setdefault(snapshot.creator_id, []).append(snapshot)
+        register_creator_name(snapshot.koc_name, snapshot.creator_id)
         for alias in _creator_user_ids(snapshot):
             creator_id_by_user_id.setdefault(alias, snapshot.creator_id)
     for snapshots in history_by_creator_id.values():
@@ -660,12 +727,27 @@ def enrich_dashboard_creator_metadata(
 
     for index, raw_user_id in enriched["user_id"].items():
         user_id = normalize_user_id(raw_user_id)
-        if user_id is None:
-            continue
         post_date = pd.to_datetime(
             enriched.at[index, "publish_date"], errors="coerce"
         )
-        creator_id = creator_id_by_user_id.get(user_id)
+        creator_id = (
+            creator_id_by_user_id.get(user_id) if user_id is not None else None
+        )
+        if creator_id is None:
+            for column in ("kol_name", "koc_name", "creator_label"):
+                if column not in enriched:
+                    continue
+                raw_name = enriched.at[index, column]
+                if raw_name is None or pd.isna(raw_name):
+                    continue
+                candidate_ids = creator_ids_by_name.get(
+                    str(raw_name).strip().casefold(), set()
+                )
+                if len(candidate_ids) == 1:
+                    creator_id = next(iter(candidate_ids))
+                    break
+        if creator_id is None:
+            continue
         current = records_by_id.get(creator_id) if creator_id is not None else None
         history = history_by_creator_id.get(creator_id, ())
         effective_record: KOCRecord | CreatorProfileSnapshot | None = None

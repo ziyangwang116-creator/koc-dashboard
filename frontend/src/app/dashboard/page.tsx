@@ -173,7 +173,9 @@ export default function DashboardPage() {
   const totalViews = summaryRows.reduce((sum, row) => sum + row.total_views, 0);
   const totalPosts = summaryRows.reduce((sum, row) => sum + row.post_count, 0);
   const coveredCreators = new Set(
-    summaryRows.filter((row) => row.post_count > 0).map((row) => row.creator_key)
+    summaryRows
+      .filter((row) => row.post_count > 0 && Boolean(row.creator_key))
+      .map((row) => row.creator_key)
   ).size;
   const trendData = useMemo(
     () =>
