@@ -4,6 +4,7 @@ import { CalendarDays, LogOut, Menu, RefreshCw } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { authApi } from "@/lib/endpoints";
 import { useQueryClient } from "@tanstack/react-query";
+import { clearPersistedQueryCache } from "@/lib/providers";
 
 export function TopBar({
   currentPeriod,
@@ -23,6 +24,8 @@ export function TopBar({
     try {
       await authApi.logout();
     } finally {
+      queryClient.clear();
+      clearPersistedQueryCache();
       router.replace("/login");
     }
   }

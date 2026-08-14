@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AppShell } from "@/components/AppShell";
 import { DataTable } from "@/components/DataTable";
 import { StateShell } from "@/components/DataStates";
@@ -35,6 +35,9 @@ const LANE_PATH: Record<Lane, "grassroot" | "long-term" | "commentary"> = {
   COMMENTARY: "commentary",
 };
 
+const COMPENSATION_STALE_TIME = 5 * 60_000;
+const COMPENSATION_GC_TIME = 60 * 60_000;
+
 function newIdempotencyKey(): string {
   return typeof crypto !== "undefined" && "randomUUID" in crypto
     ? crypto.randomUUID()
@@ -50,6 +53,7 @@ export default function CompensationPage() {
   const [lane, setLane] = useState<Lane>("GRASSROOT");
   const [periodMonth, setPeriodMonth] = useState<string>("");
   const [settlementStatus, setSettlementStatus] = useState("");
+  const [searchDraft, setSearchDraft] = useState("");
   const [q, setQ] = useState("");
   const [versionId, setVersionId] = useState<number | undefined>(undefined);
   const [rateDraft, setRateDraft] = useState("");
@@ -63,6 +67,11 @@ export default function CompensationPage() {
 
   const queryClient = useQueryClient();
 
+  useEffect(() => {
+    const timer = window.setTimeout(() => setQ(searchDraft.trim()), 300);
+    return () => window.clearTimeout(timer);
+  }, [searchDraft]);
+
   function invalidateForLane(activeLane: Lane, month: string) {
     queryClient.invalidateQueries({ queryKey: ["compensation", "periods", activeLane] });
     queryClient.invalidateQueries({ queryKey: ["compensation", "versions", activeLane, month] });
@@ -75,6 +84,8 @@ export default function CompensationPage() {
   const periodsQuery = useQuery({
     queryKey: ["compensation", "periods", lane],
     queryFn: () => compensationApi.periods(lane),
+    staleTime: COMPENSATION_STALE_TIME,
+    gcTime: COMPENSATION_GC_TIME,
   });
 
   const periods = periodsQuery.data?.data ?? [];
@@ -85,6 +96,9 @@ export default function CompensationPage() {
     queryKey: ["compensation", "versions", lane, effectiveMonth],
     queryFn: () => compensationApi.versions(effectiveMonth, lane),
     enabled: Boolean(effectiveMonth),
+    staleTime: COMPENSATION_STALE_TIME,
+    gcTime: COMPENSATION_GC_TIME,
+    placeholderData: keepPreviousData,
   });
   const versionList = versionsQuery.data?.data ?? [];
   const selectedVersion = versionList.find((v) => v.version_id === versionId);
@@ -103,24 +117,36 @@ export default function CompensationPage() {
     queryKey: ["compensation", "grassroot", baseParams],
     queryFn: () => compensationApi.grassroot(baseParams),
     enabled: lane === "GRASSROOT" && Boolean(effectiveMonth),
+    staleTime: COMPENSATION_STALE_TIME,
+    gcTime: COMPENSATION_GC_TIME,
+    placeholderData: keepPreviousData,
   });
 
   const longTermQuery = useQuery({
     queryKey: ["compensation", "long-term", baseParams],
     queryFn: () => compensationApi.longTerm(baseParams),
     enabled: lane === "LONG_TERM" && Boolean(effectiveMonth),
+    staleTime: COMPENSATION_STALE_TIME,
+    gcTime: COMPENSATION_GC_TIME,
+    placeholderData: keepPreviousData,
   });
 
   const commentaryQuery = useQuery({
     queryKey: ["compensation", "commentary", baseParams],
     queryFn: () => compensationApi.commentary(baseParams),
     enabled: lane === "COMMENTARY" && Boolean(effectiveMonth),
+    staleTime: COMPENSATION_STALE_TIME,
+    gcTime: COMPENSATION_GC_TIME,
+    placeholderData: keepPreviousData,
   });
 
   const themeSubmissionsQuery = useQuery({
     queryKey: ["compensation", "theme-submissions", effectiveMonth],
     queryFn: () => compensationApi.themeSubmissions({ period_month: effectiveMonth }),
     enabled: lane === "COMMENTARY" && Boolean(effectiveMonth),
+    staleTime: COMPENSATION_STALE_TIME,
+    gcTime: COMPENSATION_GC_TIME,
+    placeholderData: keepPreviousData,
   });
 
   const activeQuery = lane === "GRASSROOT" ? grassrootQuery : lane === "LONG_TERM" ? longTermQuery : commentaryQuery;
@@ -362,8 +388,8 @@ export default function CompensationPage() {
           </select>
           <input
             placeholder="搜索达人"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
+            value={searchDraft}
+            onChange={(e) => setSearchDraft(e.target.value)}
             style={{ ...selectStyle, minWidth: 160 }}
           />
           <input
