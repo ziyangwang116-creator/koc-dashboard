@@ -928,6 +928,150 @@ def build_compensation_router(
 
         return {"data": rows, "meta": {}}
 
+    @router.get("/api/compensation/cpm-alerts")
+    def cpm_alerts(
+        period_month: str = Query(...),
+        comparison_month: str | None = Query(default=None),
+    ) -> dict:
+        """Return existing CPM results without recalculating or writing caches."""
+        _parse_period_month(period_month)
+        if comparison_month:
+            _parse_period_month(comparison_month, "comparison_month")
+
+        repository = _repository()
+        lane_specs = (
+            (
+                "GRASSROOT",
+                repository.list_compensation_versions,
+                _grassroot_api_row,
+                "cpm_views_no_boost",
+            ),
+            (
+                "LONG_TERM",
+                repository.list_long_term_compensation_versions,
+                _long_term_api_row,
+                "cpm_views_no_boost",
+            ),
+            (
+                "COMMENTARY",
+                repository.list_commentary_compensation_versions,
+                _commentary_api_row,
+                "all_paid_views",
+            ),
+        )
+
+        def read_month(month: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+            rows: list[dict[str, Any]] = []
+            sources: list[dict[str, Any]] = []
+            for category, list_versions, converter, views_field in lane_specs:
+                versions = list_versions(month)
+                locked = next(
+                    (version for version in versions if version.status == "LOCKED"),
+                    None,
+                )
+                if locked is not None:
+                    details = locked.details
+                    source = "locked_version"
+                    status = "LOCKED"
+                    calculated_at = locked.updated_at
+                    stale_reason = None
+                else:
+                    cache = repository.get_compensation_calculation_cache(
+                        month, category
+                    )
+                    if cache is None:
+                        sources.append(
+                            {
+                                "category": category,
+                                "source": "unavailable",
+                                "status": "MISSING",
+                                "calculated_at": None,
+                                "stale_reason": None,
+                            }
+                        )
+                        continue
+                    details = cache.details
+                    source = "cache"
+                    status = cache.status
+                    calculated_at = cache.calculated_at
+                    stale_reason = cache.stale_reason
+
+                sources.append(
+                    {
+                        "category": category,
+                        "source": source,
+                        "status": status,
+                        "calculated_at": calculated_at,
+                        "stale_reason": stale_reason,
+                    }
+                )
+                for _, detail in details.iterrows():
+                    converted = converter(detail)
+                    creator_key = _text_or_none(converted.get("creator_key"))
+                    if not creator_key:
+                        continue
+                    views = _int_or_none(converted.get(views_field)) or 0
+                    receivable_usd = _float_or_none(
+                        converted.get("youdao_receivable_usd")
+                    ) or 0.0
+                    cpm = _float_or_none(converted.get("cpm"))
+                    if cpm is None and views > 0 and receivable_usd > 0:
+                        cpm = receivable_usd / views * 1000
+                    rows.append(
+                        {
+                            "creator_key": creator_key,
+                            "creator_name": _text_or_none(
+                                converted.get("creator_name")
+                            ) or creator_key,
+                            "creator_category": category,
+                            "contract_types": converted.get("contract_types") or [],
+                            "settlement_status": _text_or_none(
+                                converted.get("settlement_status")
+                            ),
+                            "all_video_views": views,
+                            "youdao_receivable_usd": receivable_usd,
+                            "cpm": cpm,
+                            "source": source,
+                            "calculation_status": status,
+                            "calculated_at": calculated_at,
+                            "stale_reason": stale_reason,
+                        }
+                    )
+            return rows, sources
+
+        current_rows, current_sources = read_month(period_month)
+        previous_rows, previous_sources = (
+            read_month(comparison_month) if comparison_month else ([], [])
+        )
+        previous_lookup = {
+            (row["creator_category"], row["creator_key"]): row
+            for row in previous_rows
+        }
+        for row in current_rows:
+            previous = previous_lookup.get(
+                (row["creator_category"], row["creator_key"])
+            )
+            previous_cpm = previous.get("cpm") if previous else None
+            row["previous_cpm"] = previous_cpm
+            row["cpm_change_rate"] = (
+                (row["cpm"] - previous_cpm) / previous_cpm
+                if row["cpm"] is not None
+                and previous_cpm is not None
+                and previous_cpm > 0
+                else None
+            )
+
+        return {
+            "data": current_rows,
+            "meta": {
+                "period_month": period_month,
+                "comparison_month": comparison_month,
+                "sources": current_sources,
+                "comparison_sources": previous_sources,
+                "read_only": True,
+            },
+        }
+
     # ------------------------------------------------------------------
     # 18.2 grassroot
     # ------------------------------------------------------------------

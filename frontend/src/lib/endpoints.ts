@@ -20,6 +20,8 @@ import type {
   GrassrootRow,
   LongTermRow,
   CommentaryRow,
+  CpmAlertMeta,
+  CpmAlertRow,
   ThemeSubmission,
   CompensationMeta,
   CompensationVersionDetail,
@@ -148,6 +150,11 @@ export const compensationApi = {
     apiClient.get<CompensationListResponse<LongTermRow>>("/compensation/long-term", params),
   commentary: (params: Record<string, unknown>) =>
     apiClient.get<CompensationListResponse<CommentaryRow>>("/compensation/commentary", params),
+  cpmAlerts: (params: { period_month: string; comparison_month?: string }) =>
+    apiClient.get<{ data: CpmAlertRow[]; meta: CpmAlertMeta }>(
+      "/compensation/cpm-alerts",
+      params
+    ),
   recalculate: (lane: "grassroot" | "long-term" | "commentary", periodMonth: string) =>
     apiClient.post<{ data: { period_month: string; category: string; calculation: CompensationMeta["calculation"] } }>(
       `/compensation/${lane}/${periodMonth}/recalculate`,

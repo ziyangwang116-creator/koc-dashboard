@@ -138,6 +138,7 @@ def test_endpoints_require_authentication(tmp_path):
 
     for path, params in [
         ("/api/compensation/periods", {}),
+        ("/api/compensation/cpm-alerts", {"period_month": "2026-06"}),
         ("/api/compensation/grassroot", {"period_month": "2026-06"}),
         ("/api/compensation/long-term", {"period_month": "2026-06"}),
         ("/api/compensation/commentary", {"period_month": "2026-06"}),
@@ -223,6 +224,100 @@ def test_grassroot_preview_isolates_category(tmp_path):
     creator_keys = {row["creator_key"] for row in body["data"]}
     assert grassroot.user_id in creator_keys
     assert long_term.user_id not in creator_keys
+
+
+def test_cpm_alerts_read_existing_cache_without_recalculation(tmp_path):
+    database_path = tmp_path / "koc.db"
+    repository = DashboardRepository(database_path)
+    repository.save_compensation_calculation_cache(
+        "2026-05",
+        "GRASSROOT",
+        jpy_to_usd_rate=0.006,
+        traffic_boost_enabled=False,
+        details=pd.DataFrame(
+            [
+                {
+                    "creator_key": "creator-1",
+                    "creator_name": "Creator One",
+                    "contract_types": "YTB",
+                    "settlement_status": "可结算",
+                    "cpm_views_no_boost": 800_000,
+                    "youdao_receivable_usd": 2_000.0,
+                    "cpm": 2.5,
+                }
+            ]
+        ),
+        summary={"overall_cpm": 2.5},
+    )
+    repository.save_compensation_calculation_cache(
+        "2026-06",
+        "GRASSROOT",
+        jpy_to_usd_rate=0.006,
+        traffic_boost_enabled=False,
+        details=pd.DataFrame(
+            [
+                {
+                    "creator_key": "creator-1",
+                    "creator_name": "Creator One",
+                    "contract_types": "YTB",
+                    "settlement_status": "可结算",
+                    "cpm_views_no_boost": 1_000_000,
+                    "youdao_receivable_usd": 3_000.0,
+                    "cpm": 3.0,
+                }
+            ]
+        ),
+        summary={"overall_cpm": 3.0},
+    )
+    before = repository.get_compensation_calculation_cache("2026-06", "GRASSROOT")
+    client = _authenticated_client(database_path)
+
+    response = client.get(
+        "/api/compensation/cpm-alerts",
+        params={"period_month": "2026-06", "comparison_month": "2026-05"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["meta"]["read_only"] is True
+    assert body["data"] == [
+        {
+            "creator_key": "creator-1",
+            "creator_name": "Creator One",
+            "creator_category": "GRASSROOT",
+            "contract_types": ["YTB"],
+            "settlement_status": "可结算",
+            "all_video_views": 1_000_000,
+            "youdao_receivable_usd": 3_000.0,
+            "cpm": 3.0,
+            "source": "cache",
+            "calculation_status": "CURRENT",
+            "calculated_at": body["data"][0]["calculated_at"],
+            "stale_reason": None,
+            "previous_cpm": 2.5,
+            "cpm_change_rate": 0.2,
+        }
+    ]
+    after = repository.get_compensation_calculation_cache("2026-06", "GRASSROOT")
+    assert after is not None and before is not None
+    assert after.calculation_version == before.calculation_version
+    assert after.calculated_at == before.calculated_at
+
+
+def test_cpm_alerts_do_not_create_missing_cache(tmp_path):
+    database_path = tmp_path / "koc.db"
+    repository = DashboardRepository(database_path)
+    client = _authenticated_client(database_path)
+
+    response = client.get(
+        "/api/compensation/cpm-alerts", params={"period_month": "2026-06"}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == []
+    assert repository.get_compensation_calculation_cache(
+        "2026-06", "GRASSROOT"
+    ) is None
 
 
 def test_preview_cache_becomes_stale_and_only_recalculate_replaces_it(tmp_path):

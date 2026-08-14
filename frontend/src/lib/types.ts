@@ -349,6 +349,43 @@ export interface CompensationMeta {
   pagination: Pagination;
 }
 
+export interface CpmAlertRow {
+  creator_key: string;
+  creator_name: string;
+  creator_category: "GRASSROOT" | "LONG_TERM" | "COMMENTARY";
+  contract_types: string[];
+  settlement_status: string | null;
+  all_video_views: number;
+  youdao_receivable_usd: number;
+  cpm: number | null;
+  previous_cpm: number | null;
+  cpm_change_rate: number | null;
+  source: "locked_version" | "cache";
+  calculation_status: string;
+  calculated_at: string | null;
+  stale_reason: string | null;
+}
+
+export interface CpmAlertMeta {
+  period_month: string;
+  comparison_month: string | null;
+  read_only: true;
+  sources: Array<{
+    category: string;
+    source: "locked_version" | "cache" | "unavailable";
+    status: string;
+    calculated_at: string | null;
+    stale_reason: string | null;
+  }>;
+  comparison_sources: Array<{
+    category: string;
+    source: "locked_version" | "cache" | "unavailable";
+    status: string;
+    calculated_at: string | null;
+    stale_reason: string | null;
+  }>;
+}
+
 export interface GrassrootRow {
   creator_key: string;
   creator_name: string;
