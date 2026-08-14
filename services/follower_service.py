@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -140,6 +141,24 @@ class FollowerService:
     def has_youtube_contract(cls, record: KOCRecord) -> bool:
         return cls._contract_platforms(record)[1]
 
+    @staticmethod
+    def _homepage_for_platform(record: KOCRecord, platform: str | None) -> str | None:
+        """Return a platform-specific profile URL without cross-platform fallback."""
+        if platform is None or platform.casefold() != "youtube":
+            return record.homepage_for_platform(platform) if platform else record.homepage_url
+
+        if record.youtube_homepage_url and record.youtube_homepage_url.strip():
+            return record.youtube_homepage_url
+        if identify_platform(record.homepage_url) == "YouTube":
+            return record.homepage_url
+
+        # A real YouTube channel ID can be queried directly even when the
+        # import did not include a separate homepage URL.
+        youtube_uid = (record.youtube_user_id or "").strip()
+        if re.fullmatch(r"UC[A-Za-z0-9_-]{20,}", youtube_uid):
+            return f"https://www.youtube.com/channel/{youtube_uid}"
+        return None
+
     def fetch_follower_count(
         self,
         homepage_url: str | None,
@@ -203,11 +222,7 @@ class FollowerService:
         record = self.repository.get(record_id)
         if record is None:
             raise ValueError("未找到要更新粉丝数的达人。")
-        profile_url = (
-            record.homepage_for_platform(required_platform)
-            if required_platform is not None
-            else record.homepage_url
-        )
+        profile_url = self._homepage_for_platform(record, required_platform)
         result = self.fetch_follower_count(
             profile_url,
             required_platform=required_platform,

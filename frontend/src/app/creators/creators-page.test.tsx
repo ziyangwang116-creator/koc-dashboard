@@ -131,6 +131,9 @@ const manualUpdateMock = vi.fn(async (_id: number, _body: Record<string, unknown
 const createBatchJobMock = vi.fn(async () => ({
   data: { job_id: "job_1", status: "PENDING", total: 1, created_at: "2026-01-01T00:00:00Z" },
 }));
+const createAllYoutubeJobMock = vi.fn(async () => ({
+  data: { job_id: "job_yt_1", status: "PENDING", total: 1, created_at: "2026-01-01T00:00:00Z" },
+}));
 const getBatchJobMock = vi.fn(async () => ({
   data: {
     job_id: "job_1",
@@ -172,6 +175,7 @@ vi.mock("@/lib/endpoints", () => ({
   followersApi: {
     manualUpdate: (...args: Parameters<typeof manualUpdateMock>) => manualUpdateMock(...args),
     createBatchJob: (...args: Parameters<typeof createBatchJobMock>) => createBatchJobMock(...args),
+    createAllYoutubeJob: (...args: Parameters<typeof createAllYoutubeJobMock>) => createAllYoutubeJobMock(...args),
     getBatchJob: (...args: Parameters<typeof getBatchJobMock>) => getBatchJobMock(...args),
     getBatchJobResults: (...args: Parameters<typeof getBatchJobResultsMock>) => getBatchJobResultsMock(...args),
   },
@@ -192,6 +196,7 @@ beforeEach(() => {
   contractRevisionsMock.mockClear();
   manualUpdateMock.mockClear();
   createBatchJobMock.mockClear();
+  createAllYoutubeJobMock.mockClear();
   getBatchJobMock.mockClear();
   getBatchJobResultsMock.mockClear();
 });
@@ -377,5 +382,14 @@ describe("CreatorsPage", () => {
 
     await waitFor(() => expect(getBatchJobResultsMock).toHaveBeenCalled());
     expect(await screen.findByText("成功")).toBeInTheDocument();
+  });
+
+  it("can trigger the all-YouTube follower update job", async () => {
+    const user = userEvent.setup();
+    renderWithQueryClient(<CreatorsPage />);
+    await waitFor(() => expect(screen.getByText("示例达人")).toBeInTheDocument());
+
+    await user.click(screen.getByRole("button", { name: "更新全部 YouTube 粉丝数" }));
+    await waitFor(() => expect(createAllYoutubeJobMock).toHaveBeenCalledTimes(1));
   });
 });

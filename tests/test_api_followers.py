@@ -25,9 +25,11 @@ class StubYouTubeProvider:
         self.count = count
         self.fail = fail
         self.calls = 0
+        self.last_url = None
 
     def fetch(self, homepage_url):
         self.calls += 1
+        self.last_url = homepage_url
         if self.fail:
             return FollowerFetchResult(
                 False, None, "YouTube", "2026-08-10T00:00:00+00:00",
@@ -404,3 +406,28 @@ def test_all_youtube_job_routes_by_current_contract(tmp_path):
     rows = client.get(f"/api/followers/batch-update-jobs/{job_id}/results").json()["data"]["rows"]
     assert [row["user_id"] for row in rows] == ["ytbcreator"]
     assert rows[0]["follower_count"] == 555
+
+
+def test_youtube_update_does_not_fallback_to_tiktok_url(tmp_path):
+    database_path = tmp_path / "koc.db"
+    repository = KOCRepository(database_path)
+    record = repository.create(
+        user_id="youtubeonly",
+        koc_name="YouTube主页缺失",
+        contract_types=["YTB长"],
+        youtube_user_id="UC1234567890123456789012",
+        homepage_url="https://www.tiktok.com/@wrong-platform",
+    )
+    youtube_provider = StubYouTubeProvider(count=321)
+    service = FollowerService(
+        repository,
+        providers={"YouTube": youtube_provider, "TikTok": StubTikTokProvider()},
+    )
+
+    outcome = service.update_one(record.id, required_platform="YouTube")
+
+    assert outcome.status == "成功"
+    assert youtube_provider.last_url == (
+        "https://www.youtube.com/channel/UC1234567890123456789012"
+    )
+    assert repository.get(record.id).youtube_follower_count == 321

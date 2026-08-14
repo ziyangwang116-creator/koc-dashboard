@@ -159,6 +159,18 @@ export default function CreatorsPage() {
     onError: (err) => setJobError(errorMessageOf(err)),
   });
 
+  const createAllYoutubeJobMutation = useMutation({
+    mutationFn: () => followersApi.createAllYoutubeJob(),
+    onSuccess: (res) => {
+      setJobError(null);
+      setJobId(res.data.job_id);
+    },
+    onError: (err) => setJobError(errorMessageOf(err)),
+  });
+
+  const followerJobPending =
+    createBatchJobMutation.isPending || createAllYoutubeJobMutation.isPending;
+
   useEffect(() => {
     if (jobDone) {
       invalidateAffectedQueries(queryClient);
@@ -518,10 +530,18 @@ export default function CreatorsPage() {
             <button
               type="button"
               style={primaryBtn}
-              disabled={createBatchJobMutation.isPending || rows.length === 0 || (jobId !== null && !jobDone)}
+              disabled={followerJobPending || rows.length === 0 || (jobId !== null && !jobDone)}
               onClick={() => createBatchJobMutation.mutate()}
             >
               触发批量更新任务
+            </button>
+            <button
+              type="button"
+              style={primaryBtn}
+              disabled={followerJobPending || (jobId !== null && !jobDone)}
+              onClick={() => createAllYoutubeJobMutation.mutate()}
+            >
+              更新全部 YouTube 粉丝数
             </button>
             {jobId && jobStatus && (
               <span style={{ fontSize: 12.5, color: "var(--color-text-muted)" }}>
