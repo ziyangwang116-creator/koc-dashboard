@@ -2,7 +2,16 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Bot, LayoutDashboard, Users, Wallet, UploadCloud } from "lucide-react";
+import {
+  Bot,
+  ChartNoAxesCombined,
+  Database,
+  LayoutDashboard,
+  UploadCloud,
+  Users,
+  Wallet,
+  X,
+} from "lucide-react";
 
 const NAV_ITEMS = [
   { href: "/dashboard", label: "数据看板", icon: LayoutDashboard },
@@ -12,22 +21,36 @@ const NAV_ITEMS = [
   { href: "/agent", label: "Agent 模式", icon: Bot },
 ];
 
-export function Sidebar() {
+export function Sidebar({
+  open = false,
+  onClose,
+}: {
+  open?: boolean;
+  onClose?: () => void;
+}) {
   const pathname = usePathname();
   return (
-    <nav aria-label="主导航" className="app-sidebar" style={styles.sidebar}>
-      <div style={styles.brand}>KOC 数据后台</div>
-      <ul className="app-sidebar-list" style={styles.list}>
+    <nav aria-label="主导航" className={`app-sidebar${open ? " is-open" : ""}`}>
+      <div className="sidebar-brand">
+        <span className="sidebar-brand-mark"><Database size={17} /></span>
+        <span>
+          <strong>KOC Console</strong>
+          <small>内容运营后台</small>
+        </span>
+        <button type="button" className="sidebar-close" onClick={onClose} aria-label="关闭导航">
+          <X size={17} />
+        </button>
+      </div>
+      <div className="sidebar-section-label">工作台</div>
+      <ul className="app-sidebar-list">
         {NAV_ITEMS.map(({ href, label, icon: Icon }) => {
           const active = pathname?.startsWith(href);
           return (
             <li key={href}>
               <Link
                 href={href}
-                style={{
-                  ...styles.link,
-                  ...(active ? styles.linkActive : {}),
-                }}
+                className={`sidebar-link${active ? " sidebar-link-active" : ""}`}
+                onClick={onClose}
               >
                 <Icon size={17} />
                 <span>{label}</span>
@@ -36,37 +59,10 @@ export function Sidebar() {
           );
         })}
       </ul>
+      <div className="sidebar-footer">
+        <ChartNoAxesCombined size={15} />
+        <span>KOC 数据运营</span>
+      </div>
     </nav>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  sidebar: {
-    background: "var(--color-surface)",
-    borderRight: "1px solid var(--color-border)",
-    display: "flex",
-    flexDirection: "column",
-    padding: "16px 12px",
-  },
-  brand: {
-    fontSize: 15,
-    fontWeight: 600,
-    padding: "4px 8px 16px",
-    color: "var(--color-text)",
-  },
-  list: { listStyle: "none", display: "flex", flexDirection: "column", gap: 4 },
-  link: {
-    display: "flex",
-    alignItems: "center",
-    gap: 10,
-    padding: "9px 10px",
-    borderRadius: "var(--radius)",
-    color: "var(--color-text-muted)",
-    fontSize: 13.5,
-  },
-  linkActive: {
-    background: "var(--color-primary-bg)",
-    color: "var(--color-primary-dark)",
-    fontWeight: 600,
-  },
-};

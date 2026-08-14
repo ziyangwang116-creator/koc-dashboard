@@ -3,6 +3,18 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
+  CalendarDays,
+  ChartNoAxesCombined,
+  Columns3,
+  Eye,
+  FileText,
+  RotateCcw,
+  SlidersHorizontal,
+  UploadCloud,
+  Users,
+  type LucideIcon,
+} from "lucide-react";
+import {
   CartesianGrid,
   Line,
   LineChart,
@@ -197,19 +209,53 @@ export default function DashboardPage() {
   const allPostColumns = buildPostColumns();
   const postColumns = allPostColumns.filter((column) => visiblePostColumns.includes(column.key));
 
+  function resetFilters() {
+    setCreatorKey("");
+    setPlatform("");
+    setContentType("");
+    setCategory("");
+    setIncludeCrossIndustry(false);
+    setTrafficBoostMode("original");
+    setPostPage(1);
+  }
+
   return (
     <AppShell currentPeriod={periodMode === "month" ? effectiveMonth : effectiveWeekStart}>
-      <section style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-        <div style={filterBar}>
-          <select value={periodMode} onChange={(e) => { setPeriodMode(e.target.value as PeriodMode); setPostPage(1); }} style={selectStyle}>
-            <option value="month">按月</option><option value="week">按周</option>
-          </select>
+      <section className="dashboard-page">
+        <header className="dashboard-heading">
+          <div>
+            <div className="dashboard-eyebrow">运营概览</div>
+            <h1>数据看板</h1>
+            <p>内容运营数据概览</p>
+          </div>
+          <div className="dashboard-period-badge">
+            <CalendarDays size={15} />
+            <span>{periodMode === "month" ? effectiveMonth : effectiveWeekStart || "未选择周期"}</span>
+          </div>
+        </header>
+
+        <div className="dashboard-filter-shell">
+          <div className="dashboard-filter-header">
+            <div className="dashboard-filter-title">
+              <SlidersHorizontal size={16} />
+              <strong>筛选条件</strong>
+            </div>
+            <button type="button" className="ui-button ui-button-outline" onClick={resetFilters}>
+              <RotateCcw size={14} />
+              重置
+            </button>
+          </div>
+          <div className="dashboard-filter-grid">
+            <div className="dashboard-segmented" aria-label="统计周期模式">
+              <button type="button" className={periodMode === "month" ? "is-active" : ""} onClick={() => { setPeriodMode("month"); setPostPage(1); }}>按月</button>
+              <button type="button" className={periodMode === "week" ? "is-active" : ""} onClick={() => { setPeriodMode("week"); setPostPage(1); }}>按周</button>
+            </div>
           {periodMode === "month" ? (
-            <select value={effectiveMonth} onChange={(e) => { setPeriodMonth(e.target.value); setPostPage(1); }} style={selectStyle}>
+            <select aria-label="统计月份" value={effectiveMonth} onChange={(e) => { setPeriodMonth(e.target.value); setPostPage(1); }} className="ui-select">
               {availableMonths.map((month) => <option key={month}>{month}</option>)}
             </select>
           ) : (
-            <select value={effectiveWeekStart} onChange={(e) => { setWeekStart(e.target.value); setPostPage(1); }} style={selectStyle}>
+            <select aria-label="统计周度" value={effectiveWeekStart} onChange={(e) => { setWeekStart(e.target.value); setPostPage(1); }} className="ui-select">
               {availableWeeks.map((week) => <option key={week.week_start} value={week.week_start}>{week.week_start} ~ {week.week_end}</option>)}
             </select>
           )}
@@ -217,38 +263,70 @@ export default function DashboardPage() {
           <FilterSelect label="全部平台" value={platform} onChange={(value) => { setPlatform(value); setPostPage(1); }} options={(options?.source_platforms ?? []).map((item) => [item, item])} />
           <FilterSelect label="全部视频类型" value={contentType} onChange={(value) => { setContentType(value); setPostPage(1); }} options={(options?.content_types ?? []).map((item) => [item, item])} />
           <FilterSelect label="全部合作类别" value={category} onChange={(value) => { setCategory(value); setPostPage(1); }} options={(options?.creator_categories ?? []).map((item) => [item, creatorCategoryLabel(item)])} />
-          <select aria-label="播放量口径" value={trafficBoostMode} onChange={(e) => { setTrafficBoostMode(e.target.value as TrafficBoostMode); setPostPage(1); }} style={selectStyle}>
+          <select aria-label="播放量口径" value={trafficBoostMode} onChange={(e) => { setTrafficBoostMode(e.target.value as TrafficBoostMode); setPostPage(1); }} className="ui-select">
             <option value="original">原始播放量</option>
             <option value="boosted_preview">7月加成后播放量</option>
           </select>
-          <label style={checkLabel}><input type="checkbox" checked={includeCrossIndustry} onChange={(e) => { setIncludeCrossIndustry(e.target.checked); setPostPage(1); }} />包含异业活动数据</label>
+            <label className="dashboard-toggle">
+              <span>包含异业活动数据</span>
+              <input type="checkbox" checked={includeCrossIndustry} onChange={(e) => { setIncludeCrossIndustry(e.target.checked); setPostPage(1); }} />
+              <span className="dashboard-toggle-track" aria-hidden="true" />
+            </label>
+          </div>
         </div>
 
-        <div className="metric-row">
-          <MetricCard label="总播放量" value={fmtInt(totalViews)} />
-          <MetricCard label="投稿总数" value={fmtInt(totalPosts)} />
-          <MetricCard label="覆盖达人" value={fmtInt(coveredCreators)} />
-          <MetricCard label="统计周期" value={periodMode === "month" ? effectiveMonth : effectiveWeekStart} />
+        <div className="dashboard-metrics">
+          <MetricCard label="总播放量" value={fmtInt(totalViews)} icon={Eye} tone="blue" />
+          <MetricCard label="投稿总数" value={fmtInt(totalPosts)} icon={FileText} tone="teal" />
+          <MetricCard label="覆盖达人" value={fmtInt(coveredCreators)} icon={Users} tone="amber" />
+          <MetricCard label="统计周期" value={periodMode === "month" ? effectiveMonth : effectiveWeekStart} icon={CalendarDays} tone="violet" />
         </div>
 
-        <Panel title="播放量趋势（完整统计周期）">
-          <StateShell isLoading={dailyQuery.isLoading} isError={dailyQuery.isError} isUnauthorized={dailyQuery.error instanceof ApiError && dailyQuery.error.status === 401} isEmpty={trendData.length === 0}>
-            <ResponsiveContainer width="100%" height={240}><LineChart data={trendData}><CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" /><XAxis dataKey="date" tick={{ fontSize: 11 }} /><YAxis tick={{ fontSize: 11 }} /><Tooltip /><Line type="monotone" dataKey="views" stroke="var(--color-primary)" strokeWidth={2} dot={false} /></LineChart></ResponsiveContainer>
-          </StateShell>
-        </Panel>
+        <div className="dashboard-overview-grid">
+          <Panel title="播放量趋势" description="完整统计周期" icon={ChartNoAxesCombined}>
+            <StateShell isLoading={dailyQuery.isLoading} isError={dailyQuery.isError} isUnauthorized={dailyQuery.error instanceof ApiError && dailyQuery.error.status === 401} isEmpty={trendData.length === 0}>
+              <div className="dashboard-chart">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={trendData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                    <XAxis dataKey="date" tick={{ fontSize: 10.5, fill: "var(--muted-foreground)" }} tickLine={false} axisLine={false} />
+                    <YAxis tick={{ fontSize: 10.5, fill: "var(--muted-foreground)" }} tickLine={false} axisLine={false} />
+                    <Tooltip contentStyle={{ border: "1px solid var(--border)", borderRadius: 8, boxShadow: "var(--shadow-sm)", fontSize: 12 }} />
+                    <Line type="monotone" dataKey="views" name="播放量" stroke="var(--chart-1)" strokeWidth={2.25} dot={false} activeDot={{ r: 4 }} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </StateShell>
+          </Panel>
 
-        <Panel title="达人汇总"><StateShell isLoading={summaryQuery.isLoading} isError={summaryQuery.isError} isEmpty={summaryRows.length === 0}><DataTable columns={summaryColumns} rows={summaryRows} rowKey={(r) => r.creator_key} /></StateShell></Panel>
+          <Panel title="最近导入" description="最近 10 个批次" icon={UploadCloud}>
+            <StateShell isLoading={importBatchesQuery.isLoading} isError={importBatchesQuery.isError} isEmpty={(importBatchesQuery.data?.data.length ?? 0) === 0}>
+              <ul className="dashboard-batch-list">
+                {(importBatchesQuery.data?.data ?? []).map((batch) => (
+                  <li key={batch.batch_id} className="dashboard-batch-item">
+                    <span className="dashboard-batch-index">#{batch.batch_id}</span>
+                    <div>
+                      <strong>{batch.period_months.join("、") || "未标记月份"} · {importModeLabel(batch.mode)}</strong>
+                      <span>输入 {fmtInt(batch.input_count)} · 保存 {fmtInt(batch.saved_count)} · 移除 {fmtInt(batch.removed_count)}</span>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </StateShell>
+          </Panel>
+        </div>
 
-        <Panel title="月度增长对比">
-          <div style={{ ...filterBar, padding: 0, border: 0, marginBottom: 10 }}>
-            <span style={{ fontSize: 13 }}>对比月</span>
-            <select value={effectiveComparisonMonth} onChange={(e) => setComparisonMonth(e.target.value)} style={selectStyle}>
+        <Panel title="达人汇总" description={`${fmtInt(summaryRows.length)} 位达人`} icon={Users}><StateShell isLoading={summaryQuery.isLoading} isError={summaryQuery.isError} isEmpty={summaryRows.length === 0}><DataTable columns={summaryColumns} rows={summaryRows} rowKey={(r) => r.creator_key} maxHeight={420} /></StateShell></Panel>
+
+        <Panel title="月度增长对比" description={`${effectiveComparisonMonth || "-"} 对比 ${effectiveMonth || "-"}`} icon={ChartNoAxesCombined}>
+          <div className="dashboard-comparison-controls">
+            <select aria-label="对比月份" value={effectiveComparisonMonth} onChange={(e) => setComparisonMonth(e.target.value)} className="ui-select">
               {[...new Set([effectiveComparisonMonth, ...availableMonths])].filter(Boolean).map((month) => <option key={month}>{month}</option>)}
             </select>
-            <select value={comparisonDimension} onChange={(e) => setComparisonDimension(e.target.value)} style={selectStyle}>
+            <select aria-label="对比维度" value={comparisonDimension} onChange={(e) => setComparisonDimension(e.target.value)} className="ui-select">
               <option value="creator">达人间</option><option value="platform">平台间</option><option value="content_type">视频类型间</option><option value="creator_category">达人类型间</option>
             </select>
-            <select value={comparisonMetric} onChange={(e) => setComparisonMetric(e.target.value)} style={selectStyle}>
+            <select aria-label="对比指标" value={comparisonMetric} onChange={(e) => setComparisonMetric(e.target.value)} className="ui-select">
               <option value="total_views">播放量变化</option><option value="post_count">投稿数量变化</option><option value="engagement_rate">互动率变化</option>
             </select>
           </div>
@@ -257,7 +335,7 @@ export default function DashboardPage() {
           </StateShell>
         </Panel>
 
-        <div style={gridTwo}>
+        <div className="dashboard-ranking-grid">
           <RankingPanel title="达人播放量 Top 10" query={creatorViewsQuery} columns={creatorRankColumns} />
           <RankingPanel title="达人投稿数 Top 10" query={creatorPostsQuery} columns={creatorRankColumns} />
           <RankingPanel title="YouTube 达人播放与投稿 Top 30" query={creatorYtbQuery} columns={creatorRankColumns} />
@@ -266,17 +344,15 @@ export default function DashboardPage() {
           <RankingPanel title="TikTok 视频播放量 Top 20" query={videoTtQuery} columns={videoRankColumns} />
         </div>
 
-        <Panel title="数据月度总表">
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
-            <span style={{ fontSize: 13, color: "var(--color-text-muted)" }}>共 {fmtInt(postPagination?.total_items)} 条，当前第 {postPage} 页</span>
-            <button type="button" style={secondaryButton} onClick={() => setShowColumnSettings((value) => !value)}>字段设置</button>
+        <Panel title="数据月度总表" description="完整投稿明细" icon={FileText}>
+          <div className="dashboard-table-toolbar">
+            <span>共 {fmtInt(postPagination?.total_items)} 条，当前第 {postPage} 页</span>
+            <button type="button" className="ui-button ui-button-outline" onClick={() => setShowColumnSettings((value) => !value)}><Columns3 size={14} />字段设置</button>
           </div>
           {showColumnSettings && <ColumnSettings columns={allPostColumns} selected={visiblePostColumns} onChange={setVisiblePostColumns} />}
           <StateShell isLoading={postsQuery.isLoading} isError={postsQuery.isError} isEmpty={postRows.length === 0}><DataTable columns={postColumns} rows={postRows} rowKey={(r) => `${r.url}-${r.publish_date ?? ""}`} /></StateShell>
-          {postPagination && <div style={paginationStyle}><button style={secondaryButton} disabled={postPage <= 1} onClick={() => setPostPage((page) => page - 1)}>上一页</button><span>{postPage} / {postPagination.total_pages}</span><button style={secondaryButton} disabled={postPage >= postPagination.total_pages} onClick={() => setPostPage((page) => page + 1)}>下一页</button></div>}
+          {postPagination && <div className="dashboard-pagination"><button className="ui-button ui-button-outline" disabled={postPage <= 1} onClick={() => setPostPage((page) => page - 1)}>上一页</button><span>{postPage} / {postPagination.total_pages}</span><button className="ui-button ui-button-outline" disabled={postPage >= postPagination.total_pages} onClick={() => setPostPage((page) => page + 1)}>下一页</button></div>}
         </Panel>
-
-        <Panel title="导入批次记录"><StateShell isLoading={importBatchesQuery.isLoading} isError={importBatchesQuery.isError} isEmpty={(importBatchesQuery.data?.data.length ?? 0) === 0}><ul style={{ display: "flex", flexDirection: "column", gap: 7 }}>{(importBatchesQuery.data?.data ?? []).map((batch) => <li key={batch.batch_id} style={batchItem}>#{batch.batch_id} · {batch.mode} · {batch.period_months.join("、")} · 输入 {fmtInt(batch.input_count)} · 保存 {fmtInt(batch.saved_count)} · 移除 {fmtInt(batch.removed_count)}</li>)}</ul></StateShell></Panel>
       </section>
     </AppShell>
   );
@@ -331,6 +407,12 @@ function buildPostColumns(): Column<DashboardPostRow>[] {
   ];
 }
 
+function importModeLabel(mode: string): string {
+  if (mode === "REPLACE_MONTHS") return "按月完整替换";
+  if (mode === "APPEND_OR_UPDATE") return "补充或更新";
+  return mode;
+}
+
 function comparisonColumns(dimension: string, metric: string): Column<ComparisonSeries>[] {
   const breakdownRate = (row: ComparisonSeries, key: string) => {
     const entry = row.breakdown?.[key];
@@ -355,35 +437,24 @@ function comparisonColumns(dimension: string, metric: string): Column<Comparison
 }
 
 function ColumnSettings({ columns, selected, onChange }: { columns: Column<DashboardPostRow>[]; selected: string[]; onChange: (keys: string[]) => void }) {
-  return <div style={columnSettings}>{columns.map((column) => <label key={column.key} style={checkLabel}><input type="checkbox" checked={selected.includes(column.key)} onChange={(e) => onChange(e.target.checked ? [...selected, column.key] : selected.filter((key) => key !== column.key))} />{column.header}</label>)}<button type="button" style={secondaryButton} onClick={() => onChange(DEFAULT_POST_COLUMN_KEYS)}>恢复默认</button><button type="button" style={secondaryButton} onClick={() => onChange(columns.map((column) => column.key))}>显示全部</button></div>;
+  return <div className="dashboard-column-settings">{columns.map((column) => <label key={column.key} className="dashboard-check-label"><input type="checkbox" checked={selected.includes(column.key)} onChange={(e) => onChange(e.target.checked ? [...selected, column.key] : selected.filter((key) => key !== column.key))} />{column.header}</label>)}<button type="button" className="ui-button ui-button-outline" onClick={() => onChange(DEFAULT_POST_COLUMN_KEYS)}>恢复默认</button><button type="button" className="ui-button ui-button-outline" onClick={() => onChange(columns.map((column) => column.key))}>显示全部</button></div>;
 }
 
 function RankingPanel<T extends RankingCreatorItem | RankingVideoItem>({ title, query, columns }: { title: string; query: { isLoading: boolean; isError: boolean; data?: { data: { items: (RankingCreatorItem | RankingVideoItem)[] } } }; columns: Column<T>[] }) {
   const rows = (query.data?.data.items ?? []) as T[];
-  return <Panel title={title}><StateShell isLoading={query.isLoading} isError={query.isError} isEmpty={rows.length === 0}><DataTable columns={columns} rows={rows} rowKey={(row) => row.rank} /></StateShell></Panel>;
+  return <Panel title={title} description={`${fmtInt(rows.length)} 条`}><StateShell isLoading={query.isLoading} isError={query.isError} isEmpty={rows.length === 0}><DataTable columns={columns} rows={rows} rowKey={(row) => row.rank} maxHeight={360} /></StateShell></Panel>;
 }
 
 function FilterSelect({ label, value, onChange, options }: { label: string; value: string; onChange: (value: string) => void; options: [string, string][] }) {
-  return <select value={value} onChange={(e) => onChange(e.target.value)} style={selectStyle}><option value="">{label}</option>{options.map(([key, text]) => <option key={key} value={key}>{text}</option>)}</select>;
+  return <select aria-label={label} value={value} onChange={(e) => onChange(e.target.value)} className="ui-select"><option value="">{label}</option>{options.map(([key, text]) => <option key={key} value={key}>{text}</option>)}</select>;
 }
 
-function MetricCard({ label, value }: { label: string; value: string }) {
-  return <div className="metric-card" style={metricCard}><div style={{ fontSize: 12, color: "var(--color-text-muted)" }}>{label}</div><div style={{ fontSize: 20, fontWeight: 700, marginTop: 4 }}>{value || "-"}</div></div>;
+function MetricCard({ label, value, icon: Icon, tone }: { label: string; value: string; icon: LucideIcon; tone: "blue" | "teal" | "amber" | "violet" }) {
+  return <div className="dashboard-metric"><span className={`dashboard-metric-icon dashboard-metric-${tone}`}><Icon size={17} /></span><div><div className="dashboard-metric-label">{label}</div><div className="dashboard-metric-value">{value || "-"}</div></div></div>;
 }
 
-function Panel({ title, children }: { title: string; children: React.ReactNode }) {
-  return <div style={panelStyle}><div style={{ fontSize: 14, fontWeight: 650, marginBottom: 10 }}>{title}</div>{children}</div>;
+function Panel({ title, description, icon: Icon, children }: { title: string; description?: string; icon?: LucideIcon; children: React.ReactNode }) {
+  return <section className="dashboard-panel"><header className="dashboard-panel-header"><div className="dashboard-panel-title">{Icon && <Icon size={15} />}<strong>{title}</strong>{description && <span>{description}</span>}</div></header><div className="dashboard-panel-body">{children}</div></section>;
 }
-
-const filterBar: React.CSSProperties = { display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: "var(--radius)", padding: 10 };
-const selectStyle: React.CSSProperties = { padding: "6px 8px", borderRadius: "var(--radius)", border: "1px solid var(--color-border)", background: "var(--color-surface)", color: "var(--color-text)", fontSize: 13 };
-const checkLabel: React.CSSProperties = { display: "flex", alignItems: "center", gap: 5, fontSize: 12.5, whiteSpace: "nowrap" };
-const panelStyle: React.CSSProperties = { background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: "var(--radius)", padding: 12, minWidth: 0 };
-const metricCard: React.CSSProperties = { background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: "var(--radius)", padding: 12 };
-const gridTwo: React.CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 430px), 1fr))", gap: 16 };
-const secondaryButton: React.CSSProperties = { border: "1px solid var(--color-border)", borderRadius: "var(--radius)", padding: "6px 10px", background: "var(--color-surface)", color: "var(--color-text)", cursor: "pointer" };
-const paginationStyle: React.CSSProperties = { display: "flex", justifyContent: "center", alignItems: "center", gap: 10, marginTop: 10, fontSize: 13 };
-const columnSettings: React.CSSProperties = { display: "flex", flexWrap: "wrap", gap: "8px 14px", padding: 10, marginBottom: 10, background: "var(--color-bg)", border: "1px solid var(--color-border)", borderRadius: "var(--radius)" };
-const batchItem: React.CSSProperties = { fontSize: 13, padding: "7px 10px", border: "1px solid var(--color-border)", borderRadius: "var(--radius)", background: "var(--color-bg)" };
 
 export { isDrop30 };

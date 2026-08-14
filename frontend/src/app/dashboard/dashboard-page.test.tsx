@@ -77,7 +77,7 @@ describe("DashboardPage", () => {
     );
 
     await waitFor(() => expect(screen.getByText("达人一")).toBeInTheDocument());
-    expect(screen.getByText("数据看板")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "数据看板" })).toBeInTheDocument();
     await waitFor(() => expect(screen.getAllByText("草根").length).toBeGreaterThan(0));
     expect(screen.getByText("包含异业活动数据")).toBeInTheDocument();
   });

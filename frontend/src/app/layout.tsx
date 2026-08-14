@@ -1,10 +1,11 @@
 import type { Metadata } from "next";
+import "@fontsource-variable/inter";
 import "./globals.css";
 import { AppProviders } from "@/lib/providers";
 
 export const metadata: Metadata = {
   title: "KOC 数据后台",
-  description: "内部数据运营只读看板",
+  description: "KOC 内容运营与报酬结算后台",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

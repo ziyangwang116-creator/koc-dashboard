@@ -1,11 +1,17 @@
 "use client";
 
-import { RefreshCw, LogOut } from "lucide-react";
+import { CalendarDays, LogOut, Menu, RefreshCw } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { authApi } from "@/lib/endpoints";
 import { useQueryClient } from "@tanstack/react-query";
 
-export function TopBar({ currentPeriod }: { currentPeriod?: string }) {
+export function TopBar({
+  currentPeriod,
+  onMenuToggle,
+}: {
+  currentPeriod?: string;
+  onMenuToggle?: () => void;
+}) {
   const router = useRouter();
   const queryClient = useQueryClient();
 
@@ -22,15 +28,23 @@ export function TopBar({ currentPeriod }: { currentPeriod?: string }) {
   }
 
   return (
-    <header style={styles.bar}>
-      <div style={styles.period}>{currentPeriod ? `当前周期：${currentPeriod}` : "未选择周期"}</div>
-      <div style={styles.actions}>
+    <header className="app-topbar">
+      <div className="topbar-context">
+        <button type="button" className="topbar-menu" onClick={onMenuToggle} aria-label="打开导航">
+          <Menu size={18} />
+        </button>
+        <div className="topbar-period">
+          <CalendarDays size={15} />
+          <span>{currentPeriod ? `当前周期 ${currentPeriod}` : "未选择周期"}</span>
+        </div>
+      </div>
+      <div className="topbar-actions">
         <button
           type="button"
           title="刷新数据"
           aria-label="刷新数据"
           onClick={handleRefresh}
-          style={styles.iconBtn}
+          className="ui-icon-button"
         >
           <RefreshCw size={16} />
         </button>
@@ -39,7 +53,7 @@ export function TopBar({ currentPeriod }: { currentPeriod?: string }) {
           title="退出登录"
           aria-label="退出登录"
           onClick={handleLogout}
-          style={styles.iconBtn}
+          className="ui-icon-button"
         >
           <LogOut size={16} />
         </button>
@@ -47,28 +61,3 @@ export function TopBar({ currentPeriod }: { currentPeriod?: string }) {
     </header>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  bar: {
-    height: 48,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    padding: "0 16px",
-    background: "var(--color-surface)",
-    borderBottom: "1px solid var(--color-border)",
-  },
-  period: { fontSize: 13, color: "var(--color-text-muted)" },
-  actions: { display: "flex", gap: 8 },
-  iconBtn: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    width: 32,
-    height: 32,
-    borderRadius: "var(--radius)",
-    border: "1px solid var(--color-border)",
-    background: "var(--color-surface)",
-    color: "var(--color-text-muted)",
-  },
-};

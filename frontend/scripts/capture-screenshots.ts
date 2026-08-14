@@ -1,7 +1,7 @@
 import { chromium, type Route } from "@playwright/test";
 import path from "node:path";
 import fs from "node:fs";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 
 const OUT_DIR = path.resolve(__dirname, "..", "e2e-screenshots");
 fs.mkdirSync(OUT_DIR, { recursive: true });
@@ -15,7 +15,7 @@ const filterOptions = {
     creator_categories: ["GRASSROOT", "LONG_TERM", "COMMENTARY"],
     source_platforms: ["YouTube", "TikTok"],
     content_types: ["long", "livestream", "YTB shorts", "tiktok"],
-    available_months: ["2026-07", "2026-06"],
+    available_months: ["2026-06", "2026-07"],
     available_weeks: [{ week_start: "2026-07-28", week_end: "2026-08-03" }],
   },
   meta: { request_id: "r1" },
@@ -68,6 +68,16 @@ const posts = {
   meta: { request_id: "r1", pagination: { page: 1, page_size: 50, total_items: 12, total_pages: 1 } },
 };
 
+const daily = {
+  data: Array.from({ length: 31 }, (_, i) => ({
+    publish_date: `2026-07-${String(i + 1).padStart(2, "0")}`,
+    post_count: 8 + (i % 5),
+    total_views: 240000 + Math.round(Math.sin(i / 3) * 70000) + i * 8500,
+    total_interactions: 4200 + i * 120,
+  })),
+  meta: { request_id: "r1" },
+};
+
 function rankingResponse(type: string, video: boolean) {
   return {
     data: {
@@ -111,12 +121,12 @@ const importBatches = {
     },
     {
       batch_id: 11,
-      mode: "APPEND_OR_UPDATE",
+      mode: "REPLACE_MONTHS",
       period_months: ["2026-06"],
-      source_files: ["6月补充.xlsx"],
-      input_count: 20,
-      saved_count: 20,
-      removed_count: 0,
+      source_files: ["6月投稿数据.xlsx"],
+      input_count: 286,
+      saved_count: 286,
+      removed_count: 12,
       created_at: "2026-07-05T09:00:00",
     },
   ],
@@ -347,6 +357,7 @@ const routes: Record<string, unknown> = {
   "**/api/dashboard/filter-options": filterOptions,
   "**/api/dashboard/summary*": summary,
   "**/api/dashboard/posts*": posts,
+  "**/api/dashboard/daily*": daily,
   "**/api/dashboard/import-batches*": importBatches,
   "**/api/meta/contract-types": contractTypes,
   "**/api/creators/1": creatorDetail,
@@ -364,9 +375,10 @@ async function fulfillJson(route: Route, body: unknown) {
 }
 
 async function main() {
-  const server = spawn("npm", ["run", "start", "--", "-p", "3100"], {
-    cwd: __dirname,
-    shell: true,
+  const nextCli = path.resolve(__dirname, "..", "node_modules", "next", "dist", "bin", "next");
+  const server = spawn(process.execPath, [nextCli, "start", "-p", "3100"], {
+    cwd: path.resolve(__dirname, ".."),
+    shell: false,
     stdio: "pipe",
   });
 
@@ -428,18 +440,34 @@ async function main() {
     ["compensation", "/compensation", 390, 844],
   ];
 
-  for (const [name, route, width, height] of shots) {
-    const page = await newPage(width, height);
-    await page.goto(`http://localhost:3100${route}`, { waitUntil: "networkidle" });
-    await page.waitForTimeout(600);
-    const filename = path.join(OUT_DIR, `${name}-${width}x${height}.png`);
-    await page.screenshot({ path: filename, fullPage: false });
-    console.log("saved", filename);
-    await page.context().close();
+  try {
+    for (const [name, route, width, height] of shots) {
+      const page = await newPage(width, height);
+      await page.goto(`http://localhost:3100${route}`, { waitUntil: "networkidle" });
+      await page.waitForTimeout(600);
+      const overflow = await page.evaluate(
+        () => document.documentElement.scrollWidth > document.documentElement.clientWidth
+      );
+      if (overflow) throw new Error(`${name} ${width}x${height} has horizontal page overflow`);
+      const filename = path.join(OUT_DIR, `${name}-${width}x${height}.png`);
+      await page.screenshot({ path: filename, fullPage: false });
+      console.log("saved", filename);
+      await page.context().close();
+    }
+  } finally {
+    await browser.close();
+    if (server.pid && process.platform === "win32") {
+      try {
+        execFileSync("taskkill", ["/pid", String(server.pid), "/T", "/F"], {
+          stdio: "ignore",
+        });
+      } catch {
+        // The process may already have exited normally.
+      }
+    } else {
+      server.kill("SIGTERM");
+    }
   }
-
-  await browser.close();
-  server.kill();
 }
 
 main().catch((err) => {
