@@ -12,6 +12,7 @@ from database.db import (
 )
 from database.postgres_schema import (
     POSTGRES_COMMENTARY_THEME_COMPAT_MIGRATION_ID,
+    POSTGRES_FOLLOWER_AUDIT_OPERATOR_MIGRATION_ID,
     POSTGRES_IMPORT_ROLLBACK_AND_LOCK_AUDIT_MIGRATION_ID,
     POSTGRES_SCHEMA_MIGRATION_ID,
     POSTGRES_SCHEMA_STATEMENTS,
@@ -235,6 +236,10 @@ def test_postgres_schema_covers_all_current_business_tables():
         assert f"CREATE TABLE IF NOT EXISTS {table_name}" in schema
     assert "AUTOINCREMENT" not in schema
     assert "PRAGMA" not in schema
+    follower_audit_schema = schema.split(
+        "CREATE TABLE IF NOT EXISTS follower_update_audit", 1
+    )[1].split("CREATE TABLE IF NOT EXISTS", 1)[0]
+    assert "operator_name TEXT" in follower_audit_schema
 
 
 def test_postgres_compatibility_migration_repairs_commentary_theme_objects():
@@ -274,6 +279,24 @@ def test_postgres_forward_migration_repairs_import_rollback_and_lock_audit():
         for sql, parameters in connection.executed
         if "INSERT INTO schema_migrations" in sql
         and POSTGRES_IMPORT_ROLLBACK_AND_LOCK_AUDIT_MIGRATION_ID in parameters
+    )
+
+
+def test_postgres_forward_migration_adds_follower_audit_operator_name():
+    connection = _FakeConnection()
+
+    apply_postgres_migrations(connection, ())
+
+    executed_sql = "\n".join(sql for sql, _ in connection.executed)
+    assert (
+        "ALTER TABLE follower_update_audit "
+        "ADD COLUMN IF NOT EXISTS operator_name TEXT"
+    ) in executed_sql
+    assert POSTGRES_FOLLOWER_AUDIT_OPERATOR_MIGRATION_ID in next(
+        parameters
+        for sql, parameters in connection.executed
+        if "INSERT INTO schema_migrations" in sql
+        and POSTGRES_FOLLOWER_AUDIT_OPERATOR_MIGRATION_ID in parameters
     )
 
 

@@ -13,6 +13,9 @@ POSTGRES_COMPENSATION_CALCULATION_CACHE_MIGRATION_ID = (
     "postgres_v5_compensation_calculation_cache"
 )
 POSTGRES_AGENT_WRITE_ACTIONS_MIGRATION_ID = "postgres_v6_agent_write_actions"
+POSTGRES_FOLLOWER_AUDIT_OPERATOR_MIGRATION_ID = (
+    "postgres_v7_follower_audit_operator"
+)
 
 
 POSTGRES_SCHEMA_STATEMENTS = (
@@ -225,6 +228,7 @@ POSTGRES_SCHEMA_STATEMENTS = (
         operator_mode TEXT NOT NULL CHECK (
             operator_mode IN ('AUTOMATIC', 'MANUAL_ASSISTED', 'MANUAL')
         ),
+        operator_name TEXT,
         created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)
     )
     """,
@@ -421,6 +425,11 @@ POSTGRES_AGENT_WRITE_ACTIONS_STATEMENTS = (
 POSTGRES_AGENT_WRITE_ACTIONS_INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_ai_pending_action_session "
     "ON ai_pending_action(session_id, status, created_at DESC)",
+)
+
+POSTGRES_FOLLOWER_AUDIT_OPERATOR_STATEMENTS = (
+    "ALTER TABLE follower_update_audit "
+    "ADD COLUMN IF NOT EXISTS operator_name TEXT",
 )
 
 
@@ -711,5 +720,17 @@ def apply_postgres_migrations(
         connection.execute(
             "INSERT INTO schema_migrations (migration_id) VALUES (?)",
             (POSTGRES_AGENT_WRITE_ACTIONS_MIGRATION_ID,),
+        )
+
+    follower_audit_operator_applied = connection.execute(
+        "SELECT 1 FROM schema_migrations WHERE migration_id = ?",
+        (POSTGRES_FOLLOWER_AUDIT_OPERATOR_MIGRATION_ID,),
+    ).fetchone()
+    if follower_audit_operator_applied is None:
+        for statement in POSTGRES_FOLLOWER_AUDIT_OPERATOR_STATEMENTS:
+            connection.execute(statement)
+        connection.execute(
+            "INSERT INTO schema_migrations (migration_id) VALUES (?)",
+            (POSTGRES_FOLLOWER_AUDIT_OPERATOR_MIGRATION_ID,),
         )
     _seed_default_creators(connection, seed_records)
