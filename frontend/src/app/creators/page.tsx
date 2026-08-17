@@ -18,6 +18,12 @@ import type {
 import { ApiError } from "@/lib/api-client";
 
 const TERMINAL_JOB_STATUSES = new Set(["SUCCEEDED", "FAILED"]);
+const JOB_STATUS_LABELS: Record<FollowerBatchJobStatus["status"], string> = {
+  PENDING: "等待启动",
+  RUNNING: "正在更新",
+  SUCCEEDED: "更新完成",
+  FAILED: "任务失败",
+};
 
 /**
  * Invalidate every query key that the API contract's affected-scope sections
@@ -47,6 +53,7 @@ export default function CreatorsPage() {
   const [q, setQ] = useState("");
   const [category, setCategory] = useState("");
   const [contractType, setContractType] = useState("");
+  const [platform, setPlatform] = useState<"all" | "youtube" | "tiktok">("all");
   const [active, setActive] = useState<"all" | "true" | "false">("all");
   const [followerStatus, setFollowerStatus] = useState("");
   const [page, setPage] = useState(1);
@@ -80,6 +87,7 @@ export default function CreatorsPage() {
     q: q || undefined,
     creator_category: category || undefined,
     contract_type: contractType || undefined,
+    platform,
     active,
     follower_sync_status: followerStatus || undefined,
     page,
@@ -137,7 +145,7 @@ export default function CreatorsPage() {
     enabled: jobId !== null,
     refetchInterval: (query) => {
       const status = query.state.data?.data.status;
-      return status && TERMINAL_JOB_STATUSES.has(status) ? false : 2000;
+      return status && TERMINAL_JOB_STATUSES.has(status) ? false : 1000;
     },
   });
   const jobStatus: FollowerBatchJobStatus | undefined = jobStatusQuery.data?.data;
@@ -146,7 +154,8 @@ export default function CreatorsPage() {
   const jobResultsQuery = useQuery({
     queryKey: ["followers", "batch-job-results", jobId],
     queryFn: () => followersApi.getBatchJobResults(jobId as string),
-    enabled: jobId !== null && jobDone,
+    enabled: jobId !== null,
+    refetchInterval: jobDone ? false : 1000,
   });
   const jobResults: FollowerBatchJobResultRow[] = jobResultsQuery.data?.data.rows ?? [];
 
@@ -168,8 +177,23 @@ export default function CreatorsPage() {
     onError: (err) => setJobError(errorMessageOf(err)),
   });
 
+  const createAllTiktokJobMutation = useMutation({
+    mutationFn: () => followersApi.createAllTiktokJob(),
+    onSuccess: (res) => {
+      setJobError(null);
+      setJobId(res.data.job_id);
+    },
+    onError: (err) => setJobError(errorMessageOf(err)),
+  });
+
   const followerJobPending =
-    createBatchJobMutation.isPending || createAllYoutubeJobMutation.isPending;
+    createBatchJobMutation.isPending ||
+    createAllYoutubeJobMutation.isPending ||
+    createAllTiktokJobMutation.isPending;
+  const jobPercent =
+    jobStatus && jobStatus.total > 0
+      ? Math.min(100, Math.round((jobStatus.processed / jobStatus.total) * 100))
+      : 0;
 
   useEffect(() => {
     if (jobDone) {
@@ -516,6 +540,28 @@ export default function CreatorsPage() {
             <option value="FAILED">FAILED</option>
             <option value="MANUAL">MANUAL</option>
           </select>
+          <div role="group" aria-label="平台筛选" style={platformFilterGroup}>
+            {(
+              [
+                ["all", "全部"],
+                ["youtube", "YouTube"],
+                ["tiktok", "TikTok"],
+              ] as const
+            ).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                aria-pressed={platform === value}
+                style={platform === value ? platformFilterActive : platformFilterButton}
+                onClick={() => {
+                  setPlatform(value);
+                  setPage(1);
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
 
         {actionError && (
@@ -533,7 +579,7 @@ export default function CreatorsPage() {
               disabled={followerJobPending || rows.length === 0 || (jobId !== null && !jobDone)}
               onClick={() => createBatchJobMutation.mutate()}
             >
-              触发批量更新任务
+              更新当前筛选页
             </button>
             <button
               type="button"
@@ -543,9 +589,18 @@ export default function CreatorsPage() {
             >
               更新全部 YouTube 粉丝数
             </button>
+            <button
+              type="button"
+              style={primaryBtn}
+              disabled={followerJobPending || (jobId !== null && !jobDone)}
+              onClick={() => createAllTiktokJobMutation.mutate()}
+            >
+              更新全部 TikTok 粉丝数
+            </button>
             {jobId && jobStatus && (
               <span style={{ fontSize: 12.5, color: "var(--color-text-muted)" }}>
-                任务 {jobStatus.job_id}：{jobStatus.status}（{jobStatus.processed}/{jobStatus.total}）
+                任务 {jobStatus.job_id}：{JOB_STATUS_LABELS[jobStatus.status]}（
+                {jobStatus.processed}/{jobStatus.total}）
               </span>
             )}
           </div>
@@ -555,11 +610,34 @@ export default function CreatorsPage() {
             </div>
           )}
           {jobStatus && (
-            <div style={{ marginTop: 8, fontSize: 12.5 }}>
+            <div style={{ marginTop: 10, fontSize: 12.5, display: "grid", gap: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <progress
+                  aria-label="粉丝更新进度"
+                  max={Math.max(jobStatus.total, 1)}
+                  value={jobStatus.processed}
+                  style={{ width: "min(460px, 70vw)", height: 12 }}
+                />
+                <strong>{jobPercent}%</strong>
+              </div>
+              {jobStatus.status === "PENDING" && <div>任务正在初始化，请稍候。</div>}
+              {jobStatus.status === "RUNNING" && (
+                <div style={{ color: "var(--color-text-muted)" }}>
+                  {jobStatus.current_koc_name
+                    ? `正在处理第 ${jobStatus.current_index}/${jobStatus.total} 位：${jobStatus.current_koc_name}`
+                    : "正在读取达人资料并准备更新。"}
+                </div>
+              )}
+              {jobStatus.status === "FAILED" && (
+                <div style={alertStyle} role="alert">
+                  {jobStatus.error_message || "后台任务异常，请重新运行。"}
+                  {jobStatus.error_code ? `（${jobStatus.error_code}）` : ""}
+                </div>
+              )}
               <div>
                 成功 {jobStatus.success} · 失败 {jobStatus.failed} · 跳过 {jobStatus.skipped}
               </div>
-              {jobDone && jobResults.length > 0 && (
+              {jobResults.length > 0 && (
                 <table style={{ width: "100%", marginTop: 8 }}>
                   <thead>
                     <tr>
@@ -1277,6 +1355,29 @@ const inputStyle: React.CSSProperties = {
 };
 
 const selectStyle: React.CSSProperties = { ...inputStyle, minWidth: 140 };
+
+const platformFilterGroup: React.CSSProperties = {
+  display: "inline-flex",
+  border: "1px solid var(--color-border)",
+  borderRadius: "var(--radius)",
+  overflow: "hidden",
+};
+
+const platformFilterButton: React.CSSProperties = {
+  border: "none",
+  borderRight: "1px solid var(--color-border)",
+  background: "var(--color-surface)",
+  color: "var(--color-text-muted)",
+  padding: "6px 10px",
+  fontSize: 12.5,
+  cursor: "pointer",
+};
+
+const platformFilterActive: React.CSSProperties = {
+  ...platformFilterButton,
+  background: "var(--color-primary)",
+  color: "#fff",
+};
 
 const panelStyle: React.CSSProperties = {
   background: "var(--color-surface)",

@@ -156,6 +156,39 @@ def test_list_creators_rejects_invalid_active_value(tmp_path):
     assert response.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
+def test_list_creators_filters_by_platform(tmp_path):
+    database_path = tmp_path / "koc.db"
+    _seed_creators(database_path)
+    client = _authenticated_client(database_path)
+
+    youtube_response = client.get(
+        "/api/creators", params={"q": PREFIX, "platform": "youtube"}
+    )
+    tiktok_response = client.get(
+        "/api/creators", params={"q": PREFIX, "platform": "tiktok"}
+    )
+
+    assert youtube_response.status_code == 200
+    assert {item["user_id"] for item in youtube_response.json()["data"]} == {
+        f"{PREFIX}inactive"
+    }
+    assert tiktok_response.status_code == 200
+    assert {item["user_id"] for item in tiktok_response.json()["data"]} == {
+        f"{PREFIX}active-grassroot"
+    }
+
+
+def test_list_creators_rejects_invalid_platform(tmp_path):
+    database_path = tmp_path / "koc.db"
+    _seed_creators(database_path)
+    client = _authenticated_client(database_path)
+
+    response = client.get("/api/creators", params={"platform": "other"})
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
 def test_list_creators_filters_by_q(tmp_path):
     database_path = tmp_path / "koc.db"
     _seed_creators(database_path)

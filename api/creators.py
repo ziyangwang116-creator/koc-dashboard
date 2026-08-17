@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from database.dashboard_repository import DashboardRepository
 from database.koc_repository import DuplicateUserIDError, KOCRepository, KOCRepositoryError
 from models.enums import CreatorCategory, FollowerSource, FollowerSyncStatus
+from services.follower_service import FollowerService
 
 from api.idempotency import IdempotencyCache
 from api.serializers import (
@@ -17,6 +18,7 @@ from api.serializers import (
 )
 
 ACTIVE_VALUES = {"all", "true", "false"}
+PLATFORM_VALUES = {"all", "youtube", "tiktok"}
 SORT_WHITELIST = {"updated_at", "-updated_at", "koc_name", "-koc_name", "id", "-id"}
 MAX_PAGE_SIZE = 100
 
@@ -190,12 +192,15 @@ def build_creators_router(
         follower_source: list[str] | None = Query(default=None),
         settlement_eligible: bool | None = Query(default=None),
         active: str = Query(default="all"),
+        platform: str = Query(default="all"),
         page: int = Query(default=1),
         page_size: int = Query(default=20),
         sort: str = Query(default="-updated_at"),
     ) -> dict:
         if active not in ACTIVE_VALUES:
             raise _validation_error(f"无效的 active 取值：{active}", "active")
+        if platform not in PLATFORM_VALUES:
+            raise _validation_error(f"无效的 platform 取值：{platform}", "platform")
         if sort not in SORT_WHITELIST:
             raise _validation_error(f"无效的 sort 取值：{sort}", "sort")
         if page < 1:
@@ -236,6 +241,19 @@ def build_creators_router(
             settlement_eligible=settlement_eligible,
             **active_kwargs,
         )
+
+        if platform == "youtube":
+            records = [
+                record
+                for record in records
+                if FollowerService.has_youtube_contract(record)
+            ]
+        elif platform == "tiktok":
+            records = [
+                record
+                for record in records
+                if FollowerService.has_tiktok_contract(record)
+            ]
 
         reverse = sort.startswith("-")
         sort_field = sort[1:] if reverse else sort

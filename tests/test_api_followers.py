@@ -300,6 +300,38 @@ def test_batch_job_no_auto_retry_on_failure(tmp_path):
     assert youtube_provider.calls == 1  # no retry after the failure
 
 
+def test_batch_job_reports_safe_job_level_failure(tmp_path):
+    database_path = tmp_path / "koc.db"
+    KOCRepository(database_path)
+
+    def failing_factory():
+        raise RuntimeError("private failure detail must not reach the API")
+
+    app = create_app(
+        _settings(database_path),
+        environment="development",
+        followers_service_factory=failing_factory,
+    )
+    client = TestClient(app)
+    assert client.post(
+        "/api/auth/login",
+        json={"password": TEAM_PASSWORD, "operator_name": "tester"},
+    ).status_code == 200
+
+    response = client.post(
+        "/api/followers/batch-update-jobs",
+        json={"record_ids": [1], "required_platform": "YouTube"},
+    )
+    final = _poll_job(client, response.json()["data"]["job_id"])
+
+    assert final["status"] == "FAILED"
+    assert final["processed"] == 0
+    assert final["error_code"] == "JOB_EXECUTION_FAILED"
+    assert "RuntimeError" in final["error_message"]
+    assert "private failure detail" not in final["error_message"]
+    assert final["last_progress_at"] is not None
+
+
 # ---------------------------------------------------------------------------
 # 19.4.4 all-tiktok / all-youtube candidate routing.
 # ---------------------------------------------------------------------------

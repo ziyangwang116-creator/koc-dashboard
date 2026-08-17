@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import uuid
 from dataclasses import replace
@@ -17,6 +18,9 @@ from models.enums import FollowerSource, FollowerSyncStatus, OperatorMode
 from services.follower_service import FollowerService, FollowerUpdateOutcome
 
 from api.dashboard_support import validation_error
+
+
+logger = logging.getLogger(__name__)
 
 # In-process job registry (per 19.4.3: "the concrete background execution
 # mechanism -- in-process thread pool, separate worker process, or a task
@@ -61,6 +65,12 @@ class JobStore:
                 "created_at": _now(),
                 "started_at": None,
                 "finished_at": None,
+                "last_progress_at": None,
+                "current_index": 0,
+                "current_record_id": None,
+                "current_koc_name": None,
+                "error_code": None,
+                "error_message": None,
                 "rows": [],
             }
         return job_id
@@ -81,6 +91,16 @@ class JobStore:
                 job["status"] = "RUNNING"
                 job["started_at"] = _now()
 
+    def mark_current(self, job_id: str, completed: int, record: Any) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
+            job["current_index"] = int(completed)
+            job["current_record_id"] = getattr(record, "id", None)
+            job["current_koc_name"] = getattr(record, "koc_name", None)
+            job["last_progress_at"] = _now()
+
     def record_row(
         self,
         job_id: str,
@@ -95,6 +115,7 @@ class JobStore:
                 return
             job["processed"] += 1
             job["rows"].append(row)
+            job["last_progress_at"] = _now()
             if status == "成功":
                 job["success"] += 1
                 if platform == "YouTube":
@@ -116,13 +137,21 @@ class JobStore:
             if job is not None:
                 job["status"] = "SUCCEEDED"
                 job["finished_at"] = _now()
+                job["last_progress_at"] = job["finished_at"]
+                job["current_record_id"] = None
+                job["current_koc_name"] = None
 
-    def mark_failed(self, job_id: str) -> None:
+    def mark_failed(self, job_id: str, *, error_type: str) -> None:
         with self._lock:
             job = self._jobs.get(job_id)
             if job is not None:
                 job["status"] = "FAILED"
                 job["finished_at"] = _now()
+                job["last_progress_at"] = job["finished_at"]
+                job["error_code"] = "JOB_EXECUTION_FAILED"
+                job["error_message"] = (
+                    f"后台任务异常（{error_type}），请重新运行；如仍失败请联系管理员查看日志。"
+                )
 
 
 def _missing_tiktok_uid_result(record) -> FollowerFetchResult:
@@ -141,7 +170,7 @@ def _missing_tiktok_uid_result(record) -> FollowerFetchResult:
 def _run_job(
     job_id: str,
     job_store: JobStore,
-    service: FollowerService,
+    service_factory: Callable[[], FollowerService],
     record_ids: list[int],
     required_platform: str | None,
     platform_by_record: dict[int, str | None] | None,
@@ -160,6 +189,9 @@ def _run_job(
     """
     job_store.mark_running(job_id)
     try:
+        # Build repository/provider objects in the worker thread. This avoids
+        # carrying request-thread resources into a long-running background job.
+        service = service_factory()
         if pre_rows:
             for row, status, platform in pre_rows:
                 job_store.record_row(job_id, row, status=status, platform=platform)
@@ -177,18 +209,33 @@ def _run_job(
                     platform=outcome.result.platform,
                 )
 
+            def _start_callback(
+                completed: int,
+                total: int,
+                record,
+            ) -> None:
+                job_store.mark_current(job_id, completed, record)
+
             service.update_many(
                 record_ids,
                 required_platform=required_platform,
                 platform_by_record=platform_by_record,
                 progress_callback=_progress_callback,
+                start_callback=_start_callback,
             )
         job = job_store.get(job_id)
         if on_success is not None and job is not None and int(job.get("success", 0)) > 0:
             on_success()
         job_store.mark_succeeded(job_id)
-    except Exception:  # noqa: BLE001 - job-level crash boundary, never a per-record failure
-        job_store.mark_failed(job_id)
+    except Exception as exc:  # noqa: BLE001 - job-level crash boundary
+        error_type = type(exc).__name__
+        # Never log str(exc): database/HTTP exceptions may contain credentials.
+        logger.error(
+            "Follower batch job failed job_id=%s error_type=%s",
+            job_id,
+            error_type,
+        )
+        job_store.mark_failed(job_id, error_type=error_type)
 
 
 def build_followers_router(
@@ -333,11 +380,19 @@ def build_followers_router(
             else None
         )
 
-        service = _service()
         job_id = job_store.create(total=len(record_ids))
         threading.Thread(
             target=_run_job,
-            args=(job_id, job_store, service, record_ids, required_platform, platform_by_record, None, _invalidate_compensation),
+            args=(
+                job_id,
+                job_store,
+                _service,
+                record_ids,
+                required_platform,
+                platform_by_record,
+                None,
+                _invalidate_compensation,
+            ),
             daemon=True,
         ).start()
 
@@ -374,6 +429,12 @@ def build_followers_router(
                 "tiktok_failed": job["tiktok_failed"],
                 "started_at": job["started_at"],
                 "finished_at": job["finished_at"],
+                "last_progress_at": job["last_progress_at"],
+                "current_index": job["current_index"],
+                "current_record_id": job["current_record_id"],
+                "current_koc_name": job["current_koc_name"],
+                "error_code": job["error_code"],
+                "error_message": job["error_message"],
             }
         }
 
@@ -397,8 +458,8 @@ def build_followers_router(
     # ------------------------------------------------------------------
     @router.post("/api/followers/batch-update-jobs/all-tiktok", status_code=202)
     def create_all_tiktok_job() -> JSONResponse:
-        service = _service()
-        candidates = service.tiktok_contract_records()
+        candidate_service = _service()
+        candidates = candidate_service.tiktok_contract_records()
 
         eligible_ids: list[int] = []
         pre_rows: list[tuple[dict[str, Any], str, str | None]] = []
@@ -410,7 +471,7 @@ def build_followers_router(
             # abort/fail the whole batch -- record an isolated skip for this
             # creator only and continue with the rest (per 19.4.4).
             result = _missing_tiktok_uid_result(record)
-            service.repository.record_follower_attempt(record.id, result)
+            candidate_service.repository.record_follower_attempt(record.id, result)
             outcome = FollowerUpdateOutcome(
                 record.id, record.user_id, record.koc_name, "跳过", result
             )
@@ -419,7 +480,16 @@ def build_followers_router(
         job_id = job_store.create(total=len(candidates))
         threading.Thread(
             target=_run_job,
-            args=(job_id, job_store, service, eligible_ids, "TikTok", None, pre_rows, _invalidate_compensation),
+            args=(
+                job_id,
+                job_store,
+                _service,
+                eligible_ids,
+                "TikTok",
+                None,
+                pre_rows,
+                _invalidate_compensation,
+            ),
             daemon=True,
         ).start()
 
@@ -438,18 +508,27 @@ def build_followers_router(
 
     @router.post("/api/followers/batch-update-jobs/all-youtube", status_code=202)
     def create_all_youtube_job() -> JSONResponse:
-        service = _service()
+        candidate_service = _service()
         candidates = [
             record
-            for record in service.repository.list(active=True)
-            if service.has_youtube_contract(record)
+            for record in candidate_service.repository.list(active=True)
+            if candidate_service.has_youtube_contract(record)
         ]
         ids = [record.id for record in candidates]
 
         job_id = job_store.create(total=len(ids))
         threading.Thread(
             target=_run_job,
-            args=(job_id, job_store, service, ids, "YouTube", None, None, _invalidate_compensation),
+            args=(
+                job_id,
+                job_store,
+                _service,
+                ids,
+                "YouTube",
+                None,
+                None,
+                _invalidate_compensation,
+            ),
             daemon=True,
         ).start()
 

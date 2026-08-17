@@ -553,6 +553,12 @@ export interface FollowerBatchJobStatus {
   tiktok_failed: number;
   started_at: string | null;
   finished_at: string | null;
+  last_progress_at: string | null;
+  current_index: number;
+  current_record_id: number | null;
+  current_koc_name: string | null;
+  error_code: string | null;
+  error_message: string | null;
 }
 
 export interface FollowerBatchJobResultRow {
