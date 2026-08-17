@@ -384,12 +384,12 @@ def test_all_tiktok_job_excludes_non_tt_contract(tmp_path):
     assert rows == []
 
 
-def test_all_tiktok_job_isolates_missing_tiktok_user_id(tmp_path):
+def test_all_tiktok_job_uses_homepage_without_tiktok_user_id(tmp_path):
     database_path = tmp_path / "koc.db"
     repository = KOCRepository(database_path)
     missing = repository.create(
         user_id="missinguid", koc_name="缺UID达人", contract_types=["TT专属"],
-        homepage_url="https://example.com/missinguid",
+        homepage_url="https://www.tiktok.com/@missinguid",
     )
     fine = repository.create(
         user_id="hasuid", koc_name="有UID达人", contract_types=["TT专属"],
@@ -401,16 +401,15 @@ def test_all_tiktok_job_isolates_missing_tiktok_user_id(tmp_path):
     response = client.post("/api/followers/batch-update-jobs/all-tiktok")
     job_id = response.json()["data"]["job_id"]
     final = _poll_job(client, job_id)
-    # The whole job still completes even though one candidate is unusable.
     assert final["status"] == "SUCCEEDED"
     assert final["total"] == 2
-    assert final["success"] == 1
-    assert final["skipped"] == 1
+    assert final["success"] == 2
+    assert final["skipped"] == 0
 
     rows = client.get(f"/api/followers/batch-update-jobs/{job_id}/results").json()["data"]["rows"]
     by_user = {row["user_id"]: row for row in rows}
-    assert by_user["missinguid"]["status"] == "跳过"
-    assert by_user["missinguid"]["error_code"] == "MISSING_TIKTOK_USER_ID"
+    assert by_user["missinguid"]["status"] == "成功"
+    assert by_user["missinguid"]["follower_count"] == 999
     assert by_user["hasuid"]["status"] == "成功"
     assert by_user["hasuid"]["follower_count"] == 999
 
@@ -462,3 +461,26 @@ def test_youtube_update_requires_youtube_homepage_url(tmp_path):
     assert outcome.result.error_code == "MISSING_URL"
     assert youtube_provider.last_url is None
     assert repository.get(record.id).youtube_follower_count is None
+
+
+def test_tiktok_update_requires_tiktok_homepage_url(tmp_path):
+    database_path = tmp_path / "koc.db"
+    repository = KOCRepository(database_path)
+    record = repository.create(
+        user_id="tiktokonly",
+        koc_name="TikTok主页缺失",
+        contract_types=["TT专属"],
+        homepage_url="https://www.youtube.com/@wrong-platform",
+    )
+    tiktok_provider = StubTikTokProvider(count=321)
+    service = FollowerService(
+        repository,
+        providers={"YouTube": StubYouTubeProvider(), "TikTok": tiktok_provider},
+    )
+
+    outcome = service.update_one(record.id, required_platform="TikTok")
+
+    assert outcome.status == "跳过"
+    assert outcome.result.error_code == "MISSING_URL"
+    assert tiktok_provider.calls == 0
+    assert repository.get(record.id).tiktok_follower_count is None

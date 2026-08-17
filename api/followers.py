@@ -12,9 +12,8 @@ from fastapi.responses import JSONResponse
 
 from database.dashboard_repository import DashboardRepository
 from database.koc_repository import KOCRepository
-from followers.base import FollowerFetchResult
 from followers.manual_provider import ManualProvider
-from models.enums import FollowerSource, FollowerSyncStatus, OperatorMode
+from models.enums import FollowerSyncStatus, OperatorMode
 from services.follower_service import FollowerService, FollowerUpdateOutcome
 
 from api.dashboard_support import validation_error
@@ -152,19 +151,6 @@ class JobStore:
                 job["error_message"] = (
                     f"后台任务异常（{error_type}），请重新运行；如仍失败请联系管理员查看日志。"
                 )
-
-
-def _missing_tiktok_uid_result(record) -> FollowerFetchResult:
-    return FollowerFetchResult(
-        False,
-        None,
-        "TikTok",
-        _now(),
-        "MISSING_TIKTOK_USER_ID",
-        "该达人缺失 tiktok_user_id，无法发起 TikTok 抓取。",
-        source=FollowerSource.MANUAL,
-        profile_url=record.homepage_for_platform("TikTok"),
-    )
 
 
 def _run_job(
@@ -461,21 +447,9 @@ def build_followers_router(
         candidate_service = _service()
         candidates = candidate_service.tiktok_contract_records()
 
-        eligible_ids: list[int] = []
-        pre_rows: list[tuple[dict[str, Any], str, str | None]] = []
-        for record in candidates:
-            if str(record.tiktok_user_id or "").strip():
-                eligible_ids.append(record.id)
-                continue
-            # A TikTok-candidate creator missing tiktok_user_id must never
-            # abort/fail the whole batch -- record an isolated skip for this
-            # creator only and continue with the rest (per 19.4.4).
-            result = _missing_tiktok_uid_result(record)
-            candidate_service.repository.record_follower_attempt(record.id, result)
-            outcome = FollowerUpdateOutcome(
-                record.id, record.user_id, record.koc_name, "跳过", result
-            )
-            pre_rows.append((FollowerService._detail_row(outcome), "跳过", "TikTok"))
+        # Public profile URLs are the only TikTok lookup input. Company IDs
+        # remain editable metadata and never gate or drive an external query.
+        eligible_ids = [record.id for record in candidates]
 
         job_id = job_store.create(total=len(candidates))
         threading.Thread(
@@ -487,7 +461,7 @@ def build_followers_router(
                 eligible_ids,
                 "TikTok",
                 None,
-                pre_rows,
+                None,
                 _invalidate_compensation,
             ),
             daemon=True,

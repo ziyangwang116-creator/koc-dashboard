@@ -591,12 +591,11 @@ def _show_data_source_status(settings: Settings) -> None:
             "已配置" if settings.youtube_api_configured else "未配置",
         )
         columns[1].metric(
-            "TikTok 本地浏览器",
-            "已准备" if settings.tiktok_browser_data_dir.exists() else "首次登录",
+            "TikTok 公开主页",
+            "云端可用",
         )
         st.caption(
-            "首次读取会打开独立浏览器窗口，请手动登录或完成验证。登录状态仅保存在本机 "
-            "TikTok 浏览器档案中，不会读取、展示或导出 Cookie。"
+            "TikTok 仅使用达人库中的公开主页链接读取粉丝数，不使用 UID、登录 Cookie 或本地浏览器会话。"
         )
 
 

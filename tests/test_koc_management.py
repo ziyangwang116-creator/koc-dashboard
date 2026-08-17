@@ -49,7 +49,7 @@ def test_koc_management_page_renders_new_filters_and_actions():
     assert any(
         metric.label == "YouTube Data API" for metric in app.metric
     )
-    assert any(metric.label == "TikTok 本地浏览器" for metric in app.metric)
+    assert any(metric.label == "TikTok 公开主页" for metric in app.metric)
     assert any("当前显示：" in caption.value for caption in app.caption)
     assert len(app.download_button) == 1
 

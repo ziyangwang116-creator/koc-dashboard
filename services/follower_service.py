@@ -10,9 +10,9 @@ import pandas as pd
 
 from database.koc_repository import KOCRepository
 from followers.base import FollowerFetchResult, FollowerProvider
-from followers.tiktok_persistent_provider import (
+from followers.tiktok_public_provider import (
     TIKTOK_BATCH_STOP_ERROR_CODES,
-    TikTokPersistentBrowserProvider,
+    TikTokPublicProfileProvider,
 )
 from followers.tiktok_provider import (
     build_tiktok_profile,
@@ -71,11 +71,7 @@ class FollowerService:
         tiktok_persistent_headless: bool = False,
     ) -> None:
         self.repository = repository
-        default_tiktok = TikTokPersistentBrowserProvider(
-            user_data_dir=tiktok_browser_data_dir
-            or Path("data") / "tiktok_browser_data",
-            headless=tiktok_persistent_headless,
-        )
+        default_tiktok = TikTokPublicProfileProvider()
         if providers is None:
             self.providers: dict[str, FollowerProvider] = {
                 "YouTube": YouTubeOfficialProvider(api_key=youtube_api_key),
@@ -83,12 +79,7 @@ class FollowerService:
             }
         else:
             self.providers = providers
-        configured_tiktok = self.providers.get("TikTok")
-        self.tiktok_provider = (
-            configured_tiktok
-            if isinstance(configured_tiktok, TikTokPersistentBrowserProvider)
-            else default_tiktok
-        )
+        self.tiktok_provider = self.providers.get("TikTok", default_tiktok)
 
     @staticmethod
     def _result(
@@ -143,8 +134,18 @@ class FollowerService:
     @staticmethod
     def _homepage_for_platform(record: KOCRecord, platform: str | None) -> str | None:
         """Return a platform-specific profile URL without cross-platform fallback."""
-        if platform is None or platform.casefold() != "youtube":
-            return record.homepage_for_platform(platform) if platform else record.homepage_url
+        if platform is None:
+            return record.homepage_url
+
+        if platform.casefold() == "tiktok":
+            if record.tiktok_homepage_url and record.tiktok_homepage_url.strip():
+                return record.tiktok_homepage_url
+            if identify_platform(record.homepage_url) == "TikTok":
+                return record.homepage_url
+            return None
+
+        if platform.casefold() != "youtube":
+            return record.homepage_for_platform(platform)
 
         if record.youtube_homepage_url and record.youtube_homepage_url.strip():
             return record.youtube_homepage_url
