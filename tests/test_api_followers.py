@@ -408,7 +408,7 @@ def test_all_youtube_job_routes_by_current_contract(tmp_path):
     assert rows[0]["follower_count"] == 555
 
 
-def test_youtube_update_does_not_fallback_to_tiktok_url(tmp_path):
+def test_youtube_update_requires_youtube_homepage_url(tmp_path):
     database_path = tmp_path / "koc.db"
     repository = KOCRepository(database_path)
     record = repository.create(
@@ -426,8 +426,7 @@ def test_youtube_update_does_not_fallback_to_tiktok_url(tmp_path):
 
     outcome = service.update_one(record.id, required_platform="YouTube")
 
-    assert outcome.status == "成功"
-    assert youtube_provider.last_url == (
-        "https://www.youtube.com/channel/UC1234567890123456789012"
-    )
-    assert repository.get(record.id).youtube_follower_count == 321
+    assert outcome.status == "跳过"
+    assert outcome.result.error_code == "MISSING_URL"
+    assert youtube_provider.last_url is None
+    assert repository.get(record.id).youtube_follower_count is None

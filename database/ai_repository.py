@@ -177,6 +177,181 @@ class AIRepository:
                 ),
             )
 
+    def create_pending_action(
+        self,
+        *,
+        action_id: str,
+        conversation_id: str,
+        session_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        preview: dict[str, Any],
+        expires_at: datetime,
+    ) -> None:
+        with connect(self.database_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO ai_pending_action (
+                    id, conversation_id, session_id, tool_name,
+                    arguments_json, preview_json, status, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?)
+                """,
+                (
+                    action_id,
+                    conversation_id,
+                    session_id,
+                    tool_name,
+                    json.dumps(arguments, ensure_ascii=False, default=str),
+                    json.dumps(preview, ensure_ascii=False, default=str),
+                    expires_at.isoformat(),
+                ),
+            )
+
+    def get_pending_action(
+        self,
+        action_id: str,
+        *,
+        conversation_id: str,
+        session_id: str,
+    ) -> dict[str, Any] | None:
+        with connect(self.database_path) as connection:
+            connection.execute(
+                """
+                UPDATE ai_pending_action
+                SET status = 'EXPIRED', resolved_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND conversation_id = ? AND session_id = ?
+                  AND status = 'PENDING' AND expires_at < ?
+                """,
+                (action_id, conversation_id, session_id, _utc_now().isoformat()),
+            )
+            row = connection.execute(
+                """
+                SELECT * FROM ai_pending_action
+                WHERE id = ? AND conversation_id = ? AND session_id = ?
+                """,
+                (action_id, conversation_id, session_id),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            arguments = json.loads(str(row["arguments_json"]))
+            preview = json.loads(str(row["preview_json"]))
+            result_summary = (
+                json.loads(str(row["result_summary_json"]))
+                if row["result_summary_json"]
+                else None
+            )
+        except json.JSONDecodeError:
+            return None
+        return {
+            "id": str(row["id"]),
+            "conversation_id": str(row["conversation_id"]),
+            "session_id": str(row["session_id"]),
+            "tool_name": str(row["tool_name"]),
+            "arguments": arguments if isinstance(arguments, dict) else {},
+            "preview": preview if isinstance(preview, dict) else {},
+            "status": str(row["status"]),
+            "created_at": str(row["created_at"]),
+            "expires_at": str(row["expires_at"]),
+            "resolved_at": row["resolved_at"],
+            "resolved_by": row["resolved_by"],
+            "result_summary": result_summary,
+        }
+
+    def list_pending_actions(
+        self,
+        conversation_id: str,
+        *,
+        session_id: str,
+    ) -> list[dict[str, Any]]:
+        with connect(self.database_path) as connection:
+            connection.execute(
+                """
+                UPDATE ai_pending_action
+                SET status = 'EXPIRED', resolved_at = CURRENT_TIMESTAMP
+                WHERE conversation_id = ? AND session_id = ?
+                  AND status = 'PENDING' AND expires_at < ?
+                """,
+                (conversation_id, session_id, _utc_now().isoformat()),
+            )
+            rows = connection.execute(
+                """
+                SELECT id, tool_name, preview_json, expires_at
+                FROM ai_pending_action
+                WHERE conversation_id = ? AND session_id = ? AND status = 'PENDING'
+                ORDER BY created_at, id
+                """,
+                (conversation_id, session_id),
+            ).fetchall()
+        actions: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                preview = json.loads(str(row["preview_json"]))
+            except json.JSONDecodeError:
+                preview = {}
+            actions.append(
+                {
+                    "action_id": str(row["id"]),
+                    "tool_name": str(row["tool_name"]),
+                    "preview": preview if isinstance(preview, dict) else {},
+                    "expires_at": str(row["expires_at"]),
+                }
+            )
+        return actions
+
+    def claim_pending_action(
+        self,
+        action_id: str,
+        *,
+        conversation_id: str,
+        session_id: str,
+        resolved_by: str,
+    ) -> bool:
+        with connect(self.database_path) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE ai_pending_action
+                SET status = 'APPROVED', resolved_at = CURRENT_TIMESTAMP,
+                    resolved_by = ?
+                WHERE id = ? AND conversation_id = ? AND session_id = ?
+                  AND status = 'PENDING' AND expires_at >= ?
+                """,
+                (
+                    resolved_by,
+                    action_id,
+                    conversation_id,
+                    session_id,
+                    _utc_now().isoformat(),
+                ),
+            )
+        return max(0, int(cursor.rowcount)) == 1
+
+    def resolve_pending_action(
+        self,
+        action_id: str,
+        *,
+        status: str,
+        result_summary: dict[str, Any] | None = None,
+        resolved_by: str | None = None,
+    ) -> None:
+        if status not in {"REJECTED", "EXECUTED", "FAILED"}:
+            raise ValueError("Invalid pending action resolution status.")
+        with connect(self.database_path) as connection:
+            connection.execute(
+                """
+                UPDATE ai_pending_action
+                SET status = ?, resolved_at = COALESCE(resolved_at, CURRENT_TIMESTAMP),
+                    resolved_by = COALESCE(?, resolved_by), result_summary_json = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    resolved_by,
+                    json.dumps(result_summary or {}, ensure_ascii=False, default=str),
+                    action_id,
+                ),
+            )
+
     def delete_expired(self) -> int:
         with connect(self.database_path) as connection:
             cursor = connection.execute(

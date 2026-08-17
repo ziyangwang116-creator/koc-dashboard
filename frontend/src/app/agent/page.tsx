@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bot, ChevronDown, Database, Loader2, Plus, Send, ShieldCheck } from "lucide-react";
+import { Bot, Check, ChevronDown, Database, Loader2, Plus, Send, ShieldCheck, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AgentVisualization } from "@/components/AgentVisualization";
@@ -10,7 +10,7 @@ import { AppShell } from "@/components/AppShell";
 import { ErrorState, LoadingState } from "@/components/DataStates";
 import { ApiError } from "@/lib/api-client";
 import { agentApi } from "@/lib/endpoints";
-import type { AgentMessage } from "@/lib/types";
+import type { AgentMessage, AgentPendingAction } from "@/lib/types";
 
 const STORAGE_KEY = "koc-agent-conversation-id";
 const SUGGESTIONS = [
@@ -83,6 +83,7 @@ export default function AgentPage() {
             content: response.data.answer,
             tool_calls: response.data.tool_calls,
             visualizations: response.data.visualizations,
+            pending_actions: response.data.pending_actions,
           },
         ];
         queryClient.setQueryData(
@@ -91,6 +92,30 @@ export default function AgentPage() {
         );
         return next;
       });
+    },
+  });
+
+  const confirmActionMutation = useMutation({
+    mutationFn: ({ actionId, approve }: { actionId: string; approve: boolean }) => {
+      if (!activeConversationId) throw new Error("对话不存在。");
+      return agentApi.confirmAction(activeConversationId, actionId, approve);
+    },
+    onSuccess: (response, variables) => {
+      setLocalMessages((current) =>
+        (current ?? messages).map((message) => ({
+          ...message,
+          pending_actions: message.pending_actions?.filter(
+            (action) => action.action_id !== variables.actionId,
+          ),
+        })),
+      );
+      queryClient.invalidateQueries({ queryKey: ["creators"] });
+      queryClient.invalidateQueries({ queryKey: ["compensation"] });
+      const statusText = response.data.status === "executed" ? "已确认执行" : "已取消操作";
+      setLocalMessages((current) => [
+        ...(current ?? messages),
+        { role: "assistant", content: `${statusText}。` },
+      ]);
     },
   });
 
@@ -131,7 +156,7 @@ export default function AgentPage() {
               <>
                 <span className="agent-badge">{status.provider_label} · {status.model}</span>
                 <span className="agent-badge agent-badge-readonly">
-                  <ShieldCheck size={14} />只读模式
+                  <ShieldCheck size={14} />可执行，写入需确认
                 </span>
               </>
             )}
@@ -199,6 +224,19 @@ export default function AgentPage() {
                     {message.visualizations?.map((chart) => (
                       <AgentVisualization key={chart.id} chart={chart} />
                     ))}
+                    {message.pending_actions?.map((action) => (
+                      <PendingActionCard
+                        key={action.action_id}
+                        action={action}
+                        disabled={confirmActionMutation.isPending}
+                        onConfirm={(approve) =>
+                          confirmActionMutation.mutate({
+                            actionId: action.action_id,
+                            approve,
+                          })
+                        }
+                      />
+                    ))}
                     {message.tool_calls && message.tool_calls.length > 0 && (
                       <details className="agent-evidence">
                         <summary><ChevronDown size={14} />查询依据</summary>
@@ -250,5 +288,41 @@ export default function AgentPage() {
         </div>
       </section>
     </AppShell>
+  );
+}
+
+function PendingActionCard({
+  action,
+  disabled,
+  onConfirm,
+}: {
+  action: AgentPendingAction;
+  disabled: boolean;
+  onConfirm: (approve: boolean) => void;
+}) {
+  const preview = action.preview;
+  const diff = typeof preview.diff === "string" ? preview.diff : null;
+  return (
+    <div className="agent-pending-action">
+      <div className="agent-pending-action-title">
+        <strong>待确认操作</strong>
+        <code>{action.tool_name}</code>
+      </div>
+      {diff ? (
+        <pre className="agent-pending-diff">{diff}</pre>
+      ) : (
+        <pre className="agent-pending-diff">
+          {JSON.stringify(preview, null, 2)}
+        </pre>
+      )}
+      <div className="agent-pending-action-buttons">
+        <button type="button" disabled={disabled} onClick={() => onConfirm(true)}>
+          <Check size={14} />确认执行
+        </button>
+        <button type="button" disabled={disabled} onClick={() => onConfirm(false)}>
+          <X size={14} />取消
+        </button>
+      </div>
+    </div>
   );
 }

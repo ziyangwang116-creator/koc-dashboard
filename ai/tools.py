@@ -2,15 +2,21 @@ from __future__ import annotations
 
 import math
 import re
+import difflib
+import hashlib
+import os
+import tempfile
 from dataclasses import asdict, is_dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
 import pandas as pd
 
 from core.dashboard_processor import build_dashboard_result, enrich_dashboard_creator_metadata
 from core.traffic_boost import apply_july_traffic_boost
+from database.ai_repository import AIRepository
 from database.dashboard_repository import CompensationVersion, DashboardRepository
 from database.koc_repository import KOCRepository
 from models.koc import KOCRecord
@@ -91,14 +97,39 @@ def _record_payload(record: KOCRecord) -> dict[str, Any]:
 
 
 class AIToolRegistry:
-    """Whitelisted read-only tools backed by existing repositories."""
+    """Whitelisted read tools plus explicitly confirmed write tools."""
 
-    def __init__(self, database_path: Path | str) -> None:
+    WRITE_TOOL_NAMES = {
+        "update_creator_profile",
+        "create_contract_change",
+        "save_exchange_rate",
+        "modify_project_file",
+    }
+
+    def __init__(
+        self,
+        database_path: Path | str,
+        *,
+        conversation_id: str | None = None,
+        session_id: str | None = None,
+        operator_name: str = "team",
+        project_root: Path | str | None = None,
+    ) -> None:
         self.dashboard_repository = DashboardRepository(database_path)
         self.creator_repository = KOCRepository(database_path)
+        self.ai_repository = AIRepository(database_path)
+        self.conversation_id = conversation_id
+        self.session_id = session_id
+        self.operator_name = str(operator_name).strip() or "team"
+        self.project_root = (
+            Path(project_root).resolve()
+            if project_root is not None
+            else Path(__file__).resolve().parents[1]
+        )
         self._records: list[KOCRecord] | None = None
         self._posts: pd.DataFrame | None = None
         self.handlers: dict[str, Callable[..., dict[str, Any]]] = {
+            "read_project_file": self.read_project_file,
             "search_creators": self.search_creators,
             "get_creator_profile": self.get_creator_profile,
             "get_creator_contract_history": self.get_creator_contract_history,
@@ -107,6 +138,11 @@ class AIToolRegistry:
             "get_compensation_breakdown": self.get_compensation_breakdown,
             "get_top_videos": self.get_top_videos,
             "audit_month_data": self.audit_month_data,
+            "get_operational_summary": self.get_operational_summary,
+            "update_creator_profile": self.update_creator_profile,
+            "create_contract_change": self.create_contract_change,
+            "save_exchange_rate": self.save_exchange_rate,
+            "modify_project_file": self.modify_project_file,
         }
 
     @property
@@ -174,11 +210,349 @@ class AIToolRegistry:
             )
         return matches[0]
 
-    def execute(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    def execute(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        allow_writes: bool = False,
+    ) -> dict[str, Any]:
         handler = self.handlers.get(name)
         if handler is None:
             raise AIToolError(f"不允许调用工具：{name}", code="UNKNOWN_TOOL")
+        if name in self.WRITE_TOOL_NAMES and not allow_writes:
+            return self._request_confirmation(name, arguments)
         return _json_value(handler(**arguments))
+
+    def _require_write_context(self) -> None:
+        if not self.conversation_id or not self.session_id:
+            raise AIToolError(
+                "写入工具必须在已认证的 Agent 对话中调用。",
+                code="WRITE_CONTEXT_REQUIRED",
+            )
+
+    def _request_confirmation(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        self._require_write_context()
+        preview = self._preview_write(tool_name, arguments)
+        action_id = str(uuid4())
+        self.ai_repository.create_pending_action(
+            action_id=action_id,
+            conversation_id=str(self.conversation_id),
+            session_id=str(self.session_id),
+            tool_name=tool_name,
+            arguments=arguments,
+            preview=preview,
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        )
+        return {
+            "status": "confirmation_required",
+            "action": {
+                "action_id": action_id,
+                "tool_name": tool_name,
+                "preview": preview,
+                "expires_in_seconds": 600,
+            },
+        }
+
+    def _preview_write(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        if tool_name == "modify_project_file":
+            return self._preview_project_file_change(arguments)
+        if tool_name == "update_creator_profile":
+            record = self._resolve_creator(arguments.get("query", ""))
+            changes = {
+                key: value
+                for key, value in arguments.items()
+                if key not in {"query", "expected_updated_at", "reason"}
+                and value is not None
+            }
+            return {
+                "kind": "creator_profile_write",
+                "creator_id": record.id,
+                "creator_name": record.koc_name,
+                "changes": changes,
+                "expected_updated_at": arguments.get("expected_updated_at") or record.updated_at,
+            }
+        if tool_name == "create_contract_change":
+            record = self._resolve_creator(arguments.get("query", ""))
+            contracts = arguments.get("contract_types")
+            if not isinstance(contracts, list) or not contracts:
+                raise AIToolError("contract_types 不能为空。")
+            effective_date = str(arguments.get("effective_date") or "").strip()
+            if not effective_date:
+                raise AIToolError("effective_date 不能为空。")
+            return {
+                "kind": "contract_change",
+                "creator_id": record.id,
+                "creator_name": record.koc_name,
+                "effective_date": effective_date,
+                "contract_types": [str(item).strip() for item in contracts if str(item).strip()],
+                "contract_end_date": arguments.get("contract_end_date"),
+                "creator_category": arguments.get("creator_category"),
+                "reason": str(arguments.get("reason") or "Agent 请求合同变更"),
+            }
+        if tool_name == "save_exchange_rate":
+            period = _validate_period(arguments.get("period_month", ""))
+            rate = float(arguments.get("jpy_to_usd_rate") or 0)
+            if rate <= 0 or rate > 1:
+                raise AIToolError("日元兑美元汇率必须大于 0 且不超过 1。")
+            return {
+                "kind": "exchange_rate_write",
+                "period_month": period,
+                "jpy_to_usd_rate": rate,
+            }
+        raise AIToolError(f"不允许调用工具：{tool_name}", code="UNKNOWN_TOOL")
+
+    def _safe_project_path(self, raw_path: str) -> Path:
+        value = str(raw_path or "").strip().replace("\\", "/")
+        if not value or value.startswith("/") or re.match(r"^[A-Za-z]:", value):
+            raise AIToolError("代码文件路径必须是项目内相对路径。", code="PATH_NOT_ALLOWED")
+        candidate = (self.project_root / value).resolve()
+        try:
+            candidate.relative_to(self.project_root)
+        except ValueError as exc:
+            raise AIToolError("代码文件路径超出项目目录。", code="PATH_NOT_ALLOWED") from exc
+        blocked_parts = {".git", ".venv", "node_modules", "data", "outputs", "output"}
+        if blocked_parts.intersection(part.casefold() for part in candidate.relative_to(self.project_root).parts):
+            raise AIToolError("该目录不允许由 Agent 修改。", code="PATH_NOT_ALLOWED")
+        if candidate.name.casefold() in {".env", "secrets.toml", "settings.json"}:
+            raise AIToolError("配置密钥文件不允许由 Agent 修改。", code="PATH_NOT_ALLOWED")
+        if candidate.suffix.casefold() not in {".py", ".ts", ".tsx", ".js", ".jsx", ".css", ".json", ".md"}:
+            raise AIToolError("Agent 只允许修改代码或文档文件。", code="FILE_TYPE_NOT_ALLOWED")
+        return candidate
+
+    def read_project_file(
+        self,
+        path: str,
+        start_line: int,
+        end_line: int,
+    ) -> dict[str, Any]:
+        file_path = self._safe_project_path(path)
+        if not file_path.exists() or not file_path.is_file():
+            raise AIToolError("代码文件不存在。", code="NOT_FOUND")
+        start = max(1, int(start_line))
+        end = min(start + 250, max(start, int(end_line)))
+        lines = file_path.read_text(encoding="utf-8").splitlines()
+        content = "\n".join(lines[start - 1 : end])
+        if len(content) > 30_000:
+            raise AIToolError("读取内容过大，请缩小行号范围。")
+        return {
+            "status": "ok",
+            "path": str(file_path.relative_to(self.project_root)).replace("\\", "/"),
+            "start_line": start,
+            "end_line": min(end, len(lines)),
+            "content": content,
+            "sha256": hashlib.sha256(file_path.read_bytes()).hexdigest(),
+        }
+
+    def _preview_project_file_change(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        file_path = self._safe_project_path(arguments.get("path", ""))
+        if not file_path.exists():
+            raise AIToolError("代码文件不存在，Agent 不能直接创建新文件。", code="NOT_FOUND")
+        old_text = str(arguments.get("old_text") or "")
+        new_text = str(arguments.get("new_text") or "")
+        if not old_text:
+            raise AIToolError("old_text 不能为空。")
+        current = file_path.read_text(encoding="utf-8")
+        expected_sha256 = str(arguments.get("expected_sha256") or "").strip()
+        actual_sha256 = hashlib.sha256(file_path.read_bytes()).hexdigest()
+        if expected_sha256 and expected_sha256 != actual_sha256:
+            raise AIToolError("文件已发生变化，请重新读取后再修改。", code="STALE_FILE")
+        occurrences = current.count(old_text)
+        max_replacements = max(1, min(int(arguments.get("max_replacements") or 1), 10))
+        if occurrences == 0:
+            raise AIToolError("old_text 在文件中不存在。", code="TEXT_NOT_FOUND")
+        if occurrences > max_replacements:
+            raise AIToolError("old_text 出现次数超过允许范围，请提供更精确的文本。", code="AMBIGUOUS")
+        updated = current.replace(old_text, new_text, max_replacements)
+        diff = "".join(
+            difflib.unified_diff(
+                current.splitlines(keepends=True),
+                updated.splitlines(keepends=True),
+                fromfile=str(file_path.relative_to(self.project_root)),
+                tofile=str(file_path.relative_to(self.project_root)),
+                n=3,
+            )
+        )
+        if len(diff) > 40_000:
+            raise AIToolError("代码改动预览过大，请拆分为多个小改动。")
+        return {
+            "kind": "project_file_write",
+            "path": str(file_path.relative_to(self.project_root)).replace("\\", "/"),
+            "diff": diff,
+            "old_sha256": actual_sha256,
+            "new_sha256": hashlib.sha256(updated.encode("utf-8")).hexdigest(),
+            "replacements": min(occurrences, max_replacements),
+            "reason": str(arguments.get("reason") or "Agent 请求代码修改"),
+        }
+
+    def update_creator_profile(
+        self,
+        query: str,
+        koc_name: str | None,
+        homepage_url: str | None,
+        youtube_homepage_url: str | None,
+        tiktok_homepage_url: str | None,
+        follower_count: int | None,
+        youtube_follower_count: int | None,
+        tiktok_follower_count: int | None,
+        note: str | None,
+        active: bool | None,
+        settlement_eligible: bool | None,
+        expected_updated_at: str | None,
+        reason: str | None,
+    ) -> dict[str, Any]:
+        record = self._resolve_creator(query)
+        if expected_updated_at and expected_updated_at != record.updated_at:
+            raise AIToolError("达人资料已变化，请重新读取后再提交。", code="STALE_REVISION")
+        follower_changed = any(
+            value is not None
+            for value in (follower_count, youtube_follower_count, tiktok_follower_count)
+        )
+        updated = self.creator_repository.update(
+            record.id,
+            user_id=record.user_id,
+            koc_name=record.koc_name if koc_name is None else koc_name,
+            creator_category=record.creator_category,
+            contract_types=record.contract_types,
+            homepage_url=record.homepage_url if homepage_url is None else homepage_url,
+            follower_count=record.follower_count if follower_count is None else follower_count,
+            active=record.active if active is None else active,
+            note=record.note if note is None else note,
+            youtube_user_id=record.youtube_user_id,
+            youtube_homepage_url=(
+                record.youtube_homepage_url
+                if youtube_homepage_url is None
+                else youtube_homepage_url
+            ),
+            youtube_follower_count=(
+                record.youtube_follower_count
+                if youtube_follower_count is None
+                else youtube_follower_count
+            ),
+            tiktok_user_id=record.tiktok_user_id,
+            tiktok_homepage_url=(
+                record.tiktok_homepage_url
+                if tiktok_homepage_url is None
+                else tiktok_homepage_url
+            ),
+            tiktok_follower_count=(
+                record.tiktok_follower_count
+                if tiktok_follower_count is None
+                else tiktok_follower_count
+            ),
+            manual_follower_update=follower_changed,
+            manual_settlement_eligible=(
+                settlement_eligible
+                if settlement_eligible is not None
+                else record.settlement_eligible
+            ),
+        )
+        self.dashboard_repository.invalidate_compensation_calculation_cache(
+            reason=str(reason or "Agent 更新达人资料")
+        )
+        self._records = None
+        return {
+            "status": "ok",
+            "creator": _record_payload(updated),
+            "written_by": self.operator_name,
+        }
+
+    def create_contract_change(
+        self,
+        query: str,
+        effective_date: str,
+        contract_types: list[str],
+        contract_end_date: str | None,
+        creator_category: str | None,
+        reason: str,
+    ) -> dict[str, Any]:
+        record = self._resolve_creator(query)
+        updated = self.creator_repository.create_contract_change(
+            record.id,
+            effective_date=effective_date,
+            contract_types=contract_types,
+            contract_end_date=contract_end_date,
+            creator_category=creator_category,
+            reason=reason,
+        )
+        self.dashboard_repository.invalidate_compensation_calculation_cache(
+            from_period_month=str(effective_date)[:7],
+            reason=str(reason or "Agent 更新合同周期"),
+        )
+        self._records = None
+        return {
+            "status": "ok",
+            "creator": _record_payload(updated),
+            "written_by": self.operator_name,
+        }
+
+    def save_exchange_rate(
+        self,
+        period_month: str,
+        jpy_to_usd_rate: float,
+    ) -> dict[str, Any]:
+        period = _validate_period(period_month)
+        rate = float(jpy_to_usd_rate)
+        if rate <= 0 or rate > 1:
+            raise AIToolError("日元兑美元汇率必须大于 0 且不超过 1。")
+        self.dashboard_repository.save_jpy_to_usd_rate(period, rate)
+        return {
+            "status": "ok",
+            "period_month": period,
+            "jpy_to_usd_rate": rate,
+            "written_by": self.operator_name,
+        }
+
+    def modify_project_file(
+        self,
+        path: str,
+        old_text: str,
+        new_text: str,
+        expected_sha256: str | None,
+        max_replacements: int,
+        reason: str,
+    ) -> dict[str, Any]:
+        file_path = self._safe_project_path(path)
+        if not file_path.exists():
+            raise AIToolError("代码文件不存在。", code="NOT_FOUND")
+        current = file_path.read_text(encoding="utf-8")
+        actual_sha256 = hashlib.sha256(file_path.read_bytes()).hexdigest()
+        if expected_sha256 and expected_sha256 != actual_sha256:
+            raise AIToolError("文件已发生变化，请重新读取后再修改。", code="STALE_FILE")
+        replacements = max(1, min(int(max_replacements or 1), 10))
+        if not old_text or current.count(old_text) == 0:
+            raise AIToolError("old_text 在文件中不存在。", code="TEXT_NOT_FOUND")
+        if current.count(old_text) > replacements:
+            raise AIToolError("old_text 出现次数超过允许范围。", code="AMBIGUOUS")
+        updated = current.replace(old_text, new_text, replacements)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{file_path.name}.", suffix=".agent-tmp", dir=file_path.parent
+        )
+        os.close(fd)
+        temp_path = Path(temp_name)
+        try:
+            temp_path.write_text(updated, encoding="utf-8", newline="")
+            temp_path.replace(file_path)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
+        return {
+            "status": "ok",
+            "path": str(file_path.relative_to(self.project_root)).replace("\\", "/"),
+            "replacements": min(current.count(old_text), replacements),
+            "sha256": hashlib.sha256(updated.encode("utf-8")).hexdigest(),
+            "reason": reason,
+            "written_by": self.operator_name,
+            "deployment_note": "代码已写入当前运行环境；是否部署仍需单独执行 Git/部署流程。",
+        }
 
     def search_creators(
         self,
@@ -584,4 +958,69 @@ class AIToolRegistry:
                 set(unmatched.get("user_id", pd.Series(dtype="string")).dropna().astype(str))
             )[:30],
             "import_batches": batches.head(10).to_dict("records"),
+        }
+
+    def get_operational_summary(
+        self,
+        period_month: str,
+        include_cross_industry: bool,
+    ) -> dict[str, Any]:
+        """Return one database-backed monthly operations snapshot for the Agent."""
+        period = _validate_period(period_month)
+        scoped = self._month_posts(
+            period, include_cross_industry=include_cross_industry
+        )
+        summary = self._performance_summary(scoped)
+        creator_ids = pd.to_numeric(
+            scoped.get("creator_id", pd.Series(dtype="Int64")), errors="coerce"
+        )
+        creator_count = int(creator_ids.dropna().nunique())
+
+        if scoped.empty:
+            top_creators: list[dict[str, Any]] = []
+        else:
+            prepared = scoped.copy()
+            prepared["views"] = pd.to_numeric(
+                prepared.get("views"), errors="coerce"
+            ).fillna(0)
+            prepared["koc_name"] = prepared.get(
+                "koc_name", pd.Series("", index=prepared.index)
+            ).astype("string").fillna("")
+            grouped = (
+                prepared.groupby(["creator_id", "koc_name"], dropna=False)
+                .agg(post_count=("creator_id", "size"), views=("views", "sum"))
+                .reset_index()
+                .sort_values(["views", "post_count"], ascending=False, kind="stable")
+                .head(10)
+            )
+            top_creators = [
+                {
+                    "creator_id": (
+                        int(row.creator_id)
+                        if pd.notna(row.creator_id)
+                        else None
+                    ),
+                    "koc_name": str(row.koc_name),
+                    "post_count": int(row.post_count),
+                    "views": int(row.views),
+                }
+                for row in grouped.itertuples(index=False)
+            ]
+
+        audit = self.audit_month_data(period)
+        return {
+            "status": "ok",
+            "period_month": period,
+            "include_cross_industry": include_cross_industry,
+            "traffic_boost_enabled": self.dashboard_repository.get_traffic_boost_enabled(period),
+            "creator_count": creator_count,
+            "summary": summary,
+            "top_creators_by_views": top_creators,
+            "data_quality": {
+                "unmatched_post_count": audit["unmatched_post_count"],
+                "missing_url_count": audit["missing_url_count"],
+                "duplicate_platform_url_rows": audit["duplicate_platform_url_rows"],
+                "cross_industry_post_count": audit["cross_industry_post_count"],
+            },
+            "source": "database_tool_result",
         }

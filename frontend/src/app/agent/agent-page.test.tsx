@@ -15,7 +15,9 @@ const mocks = vi.hoisted(() => ({
       provider: "deepseek",
       provider_label: "DeepSeek",
       model: "deepseek-chat",
-      read_only: true,
+      read_only: false,
+      write_enabled: true,
+      writes_require_confirmation: true,
     },
   })),
   createConversation: vi.fn(async () => ({
@@ -53,7 +55,16 @@ const mocks = vi.hoisted(() => ({
           source: { tool: "compare_creator_months", database_backed: true, creator_id: 1, creator_name: "白黑女神", periods: ["2026-06", "2026-07"] },
         },
       ],
+      pending_actions: [] as Array<{
+        action_id: string;
+        tool_name: string;
+        preview: Record<string, unknown>;
+        expires_in_seconds: number;
+      }>,
     },
+  })),
+  confirmAction: vi.fn(async () => ({
+    data: { status: "executed", action_id: "action-1", result: { status: "ok" } },
   })),
 }));
 
@@ -63,6 +74,7 @@ vi.mock("@/lib/endpoints", () => ({
     createConversation: mocks.createConversation,
     messages: mocks.messages,
     sendMessage: mocks.sendMessage,
+    confirmAction: mocks.confirmAction,
   },
   authApi: { logout: vi.fn(async () => ({ data: { authenticated: false } })) },
 }));
@@ -75,12 +87,12 @@ describe("AgentPage", () => {
     vi.clearAllMocks();
   });
 
-  it("renders provider status, read-only scope, and suggested questions", async () => {
+  it("renders provider status, confirmed-write scope, and suggested questions", async () => {
     renderWithQueryClient(<AgentPage />);
 
     expect(screen.getByRole("heading", { name: "运营 Agent" })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByText("DeepSeek · deepseek-chat")).toBeInTheDocument());
-    expect(screen.getByText("只读模式")).toBeInTheDocument();
+    expect(screen.getByText("可执行，写入需确认")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "分析 2026-07 整体运营表现" })).toBeEnabled();
   });
 
@@ -106,5 +118,41 @@ describe("AgentPage", () => {
     expect(screen.getByRole("button", { name: "下载 白黑女神 投稿数量对比 PNG" })).toBeInTheDocument();
     await user.click(screen.getByText("查询依据"));
     expect(screen.getByText("audit_month_data")).toBeInTheDocument();
+  });
+
+  it("shows a write preview and requires confirmation before execution", async () => {
+    mocks.sendMessage.mockResolvedValueOnce({
+      data: {
+        conversation_id: "32ee0527-bbc5-4392-965d-bd28ef2751ed",
+        answer: "请确认写入。",
+        tool_calls: [],
+        visualizations: [],
+        pending_actions: [
+          {
+            action_id: "action-1",
+            tool_name: "save_exchange_rate",
+            preview: { period_month: "2026-07", jpy_to_usd_rate: 0.0062 },
+            expires_in_seconds: 600,
+          },
+        ],
+      },
+    });
+    const user = userEvent.setup();
+    renderWithQueryClient(<AgentPage />);
+    await screen.findByText("DeepSeek · deepseek-chat");
+
+    await user.type(screen.getByLabelText("向运营 Agent 提问"), "保存 7 月汇率");
+    await user.click(screen.getByRole("button", { name: "发送问题" }));
+
+    expect(await screen.findByText("待确认操作")).toBeInTheDocument();
+    expect(screen.getByText("save_exchange_rate")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "确认执行" }));
+    await waitFor(() =>
+      expect(mocks.confirmAction).toHaveBeenCalledWith(
+        "32ee0527-bbc5-4392-965d-bd28ef2751ed",
+        "action-1",
+        true,
+      ),
+    );
   });
 });

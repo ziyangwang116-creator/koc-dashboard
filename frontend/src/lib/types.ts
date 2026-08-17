@@ -579,7 +579,9 @@ export interface AgentStatus {
   provider: "deepseek" | "openai";
   provider_label: string;
   model: string;
-  read_only: true;
+  read_only: boolean;
+  write_enabled?: boolean;
+  writes_require_confirmation?: boolean;
 }
 
 export interface AgentMessage {
@@ -589,6 +591,7 @@ export interface AgentMessage {
   created_at?: string;
   tool_calls?: AgentToolEvidence[];
   visualizations?: AgentVisualization[];
+  pending_actions?: AgentPendingAction[];
 }
 
 export interface AgentToolEvidence {
@@ -602,6 +605,21 @@ export interface AgentReply {
   answer: string;
   tool_calls: AgentToolEvidence[];
   visualizations: AgentVisualization[];
+  pending_actions: AgentPendingAction[];
+}
+
+export interface AgentPendingAction {
+  action_id: string;
+  tool_name: string;
+  preview: Record<string, unknown>;
+  expires_in_seconds: number;
+}
+
+export interface AgentActionResult {
+  status: "rejected" | "executed" | "pending" | "approved" | "failed" | string;
+  action_id: string;
+  result?: Record<string, unknown>;
+  result_summary?: Record<string, unknown> | null;
 }
 
 export interface AgentVisualizationSeries {

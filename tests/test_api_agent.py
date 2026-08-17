@@ -75,7 +75,9 @@ def test_agent_status_exposes_configuration_without_secrets(tmp_path):
             "provider": "deepseek",
             "provider_label": "DeepSeek",
             "model": "deepseek-test-model",
-            "read_only": True,
+            "read_only": False,
+            "write_enabled": True,
+            "writes_require_confirmation": True,
         }
     }
     assert "test-secret-key" not in response.text
@@ -264,3 +266,50 @@ def test_agent_provider_errors_are_sanitized(tmp_path):
     }
     assert "secret-host.example" not in response.text
     assert "sk-private" not in response.text
+
+
+def test_agent_write_action_requires_explicit_confirmation(tmp_path):
+    class ActionService:
+        def __init__(self):
+            self.confirmed = []
+
+        def ask(self, **_kwargs):
+            return AIAgentResponse(
+                answer="请确认写入。",
+                tool_calls=(),
+                pending_actions=(
+                    {
+                        "action_id": "action-1",
+                        "tool_name": "save_exchange_rate",
+                        "preview": {
+                            "period_month": "2026-07",
+                            "jpy_to_usd_rate": 0.0062,
+                        },
+                        "expires_in_seconds": 600,
+                    },
+                ),
+            )
+
+        def confirm_action(self, **kwargs):
+            self.confirmed.append(kwargs)
+            return {"status": "executed", "action_id": kwargs["action_id"]}
+
+    service = ActionService()
+    client = _client(tmp_path / "agent.db", service=service)
+    _login(client)
+    conversation_id = _new_conversation(client)
+
+    response = client.post(
+        f"/api/agent/conversations/{conversation_id}/messages",
+        json={"message": "保存 7 月汇率"},
+    )
+    assert response.status_code == 200
+    assert response.json()["data"]["pending_actions"][0]["action_id"] == "action-1"
+
+    confirmed = client.post(
+        f"/api/agent/conversations/{conversation_id}/actions/action-1/confirm",
+        json={"approve": True},
+    )
+    assert confirmed.status_code == 200
+    assert confirmed.json()["data"]["status"] == "executed"
+    assert service.confirmed[0]["session_id"]

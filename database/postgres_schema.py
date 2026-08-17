@@ -12,6 +12,7 @@ POSTGRES_IMPORT_ROLLBACK_AND_LOCK_AUDIT_MIGRATION_ID = (
 POSTGRES_COMPENSATION_CALCULATION_CACHE_MIGRATION_ID = (
     "postgres_v5_compensation_calculation_cache"
 )
+POSTGRES_AGENT_WRITE_ACTIONS_MIGRATION_ID = "postgres_v6_agent_write_actions"
 
 
 POSTGRES_SCHEMA_STATEMENTS = (
@@ -395,6 +396,33 @@ POSTGRES_SCHEMA_STATEMENTS = (
     """,
 )
 
+POSTGRES_AGENT_WRITE_ACTIONS_STATEMENTS = (
+    """
+    CREATE TABLE IF NOT EXISTS ai_pending_action (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL REFERENCES ai_conversation(id)
+            ON DELETE CASCADE,
+        session_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        arguments_json TEXT NOT NULL,
+        preview_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (
+            status IN ('PENDING', 'APPROVED', 'REJECTED', 'EXECUTED', 'FAILED', 'EXPIRED')
+        ),
+        created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+        expires_at TEXT NOT NULL,
+        resolved_at TEXT,
+        resolved_by TEXT,
+        result_summary_json TEXT
+    )
+    """,
+)
+
+POSTGRES_AGENT_WRITE_ACTIONS_INDEX_STATEMENTS = (
+    "CREATE INDEX IF NOT EXISTS idx_ai_pending_action_session "
+    "ON ai_pending_action(session_id, status, created_at DESC)",
+)
+
 
 POSTGRES_INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_koc_master_user_id ON koc_master(user_id)",
@@ -669,5 +697,19 @@ def apply_postgres_migrations(
         connection.execute(
             "INSERT INTO schema_migrations (migration_id) VALUES (?)",
             (POSTGRES_COMPENSATION_CALCULATION_CACHE_MIGRATION_ID,),
+        )
+
+    write_actions_applied = connection.execute(
+        "SELECT 1 FROM schema_migrations WHERE migration_id = ?",
+        (POSTGRES_AGENT_WRITE_ACTIONS_MIGRATION_ID,),
+    ).fetchone()
+    if write_actions_applied is None:
+        for statement in POSTGRES_AGENT_WRITE_ACTIONS_STATEMENTS:
+            connection.execute(statement)
+        for statement in POSTGRES_AGENT_WRITE_ACTIONS_INDEX_STATEMENTS:
+            connection.execute(statement)
+        connection.execute(
+            "INSERT INTO schema_migrations (migration_id) VALUES (?)",
+            (POSTGRES_AGENT_WRITE_ACTIONS_MIGRATION_ID,),
         )
     _seed_default_creators(connection, seed_records)

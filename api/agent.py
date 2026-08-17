@@ -16,6 +16,10 @@ class AgentMessageRequest(BaseModel):
     message: str | None = None
 
 
+class AgentActionRequest(BaseModel):
+    approve: bool = False
+
+
 def _error(status_code: int, code: str, message: str) -> HTTPException:
     return HTTPException(
         status_code=status_code,
@@ -48,6 +52,20 @@ def _public_message(item: dict[str, Any]) -> dict[str, Any]:
         "content": item.get("content"),
         "created_at": item.get("created_at"),
         "visualizations": sanitize_visualizations(metadata.get("visualizations")),
+        "pending_actions": [
+            _public_pending_action(action)
+            for action in (metadata.get("pending_actions") or [])
+            if isinstance(action, dict)
+        ],
+    }
+
+
+def _public_pending_action(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "action_id": str(item.get("action_id", "")),
+        "tool_name": str(item.get("tool_name", "")),
+        "preview": item.get("preview", {}),
+        "expires_in_seconds": int(item.get("expires_in_seconds", 0) or 0),
     }
 
 
@@ -70,7 +88,7 @@ def build_agent_router(
     def repository() -> AIRepository:
         return AIRepository(database_path)
 
-    def create_service():
+    def create_service(*, context: dict | None = None, conversation_id: str | None = None):
         if service_factory is not None:
             return service_factory()
         return AIAgentService(
@@ -79,6 +97,8 @@ def build_agent_router(
             model=model,
             provider=provider_name,
             base_url=base_url,
+            session_id=(context or {}).get("session_id"),
+            operator_name=(context or {}).get("operator_name") or "team",
         )
 
     def require_conversation(conversation_id: str, session_id: str) -> str:
@@ -95,7 +115,9 @@ def build_agent_router(
                 "provider": provider_name,
                 "provider_label": provider_label,
                 "model": model,
-                "read_only": True,
+                "read_only": False,
+                "write_enabled": True,
+                "writes_require_confirmation": True,
             }
         }
 
@@ -111,15 +133,28 @@ def build_agent_router(
         context: dict = session_context,
     ) -> dict[str, Any]:
         normalized = require_conversation(conversation_id, context["session_id"])
-        return {
-            "data": [
-                _public_message(item)
-                for item in repository().list_messages_for_session(
-                    normalized,
-                    context["session_id"],
-                    limit=50,
-                )
+        active_actions = {
+            item["action_id"]: item
+            for item in repository().list_pending_actions(
+                normalized,
+                session_id=context["session_id"],
+            )
+        }
+        messages = []
+        for item in repository().list_messages_for_session(
+            normalized,
+            context["session_id"],
+            limit=50,
+        ):
+            public = _public_message(item)
+            public["pending_actions"] = [
+                action
+                for action in public.get("pending_actions", [])
+                if action.get("action_id") in active_actions
             ]
+            messages.append(public)
+        return {
+            "data": messages
         }
 
     @router.post("/conversations/{conversation_id}/messages")
@@ -138,10 +173,13 @@ def build_agent_router(
 
         normalized = require_conversation(conversation_id, context["session_id"])
         try:
-            response = create_service().ask(
-                conversation_id=normalized,
-                session_id=context["session_id"],
-                message=cleaned_message,
+            response = create_service(
+                    context=context,
+                    conversation_id=normalized,
+                ).ask(
+                    conversation_id=normalized,
+                    session_id=context["session_id"],
+                    message=cleaned_message,
             )
         except PermissionError as exc:
             raise _error(404, "CONVERSATION_NOT_FOUND", "对话不存在或已过期。") from exc
@@ -163,7 +201,33 @@ def build_agent_router(
                 "answer": response.answer,
                 "tool_calls": evidence,
                 "visualizations": visualizations,
+                "pending_actions": [
+                    _public_pending_action(item)
+                    for item in response.pending_actions
+                ],
             }
         }
+
+    @router.post("/conversations/{conversation_id}/actions/{action_id}/confirm")
+    def confirm_action(
+        conversation_id: str,
+        action_id: str,
+        payload: AgentActionRequest,
+        context: dict = session_context,
+    ) -> dict[str, Any]:
+        normalized = require_conversation(conversation_id, context["session_id"])
+        try:
+            result = create_service(
+                context=context,
+                conversation_id=normalized,
+            ).confirm_action(
+                conversation_id=normalized,
+                session_id=context["session_id"],
+                action_id=action_id,
+                approve=bool(payload.approve),
+            )
+        except AIAgentServiceError as exc:
+            raise _safe_service_error(exc) from exc
+        return {"data": result}
 
     return router

@@ -27,6 +27,7 @@ class AIAgentResponse:
     answer: str
     tool_calls: tuple[dict[str, Any], ...]
     visualizations: tuple[dict[str, Any], ...] = ()
+    pending_actions: tuple[dict[str, Any], ...] = ()
 
 
 def _item_value(item: Any, name: str, default: Any = None) -> Any:
@@ -114,9 +115,20 @@ class AIAgentService:
         provider: str = "openai",
         base_url: str | None = None,
         client: Any | None = None,
+        session_id: str | None = None,
+        operator_name: str = "team",
+        project_root: Path | str | None = None,
     ) -> None:
         self.repository = AIRepository(database_path)
-        self.tools = AIToolRegistry(database_path)
+        self.session_id = session_id
+        self.operator_name = str(operator_name).strip() or "team"
+        self.project_root = project_root
+        self.tools = AIToolRegistry(
+            database_path,
+            session_id=session_id,
+            operator_name=self.operator_name,
+            project_root=project_root,
+        )
         self.provider = str(provider).strip().casefold()
         if self.provider not in {"deepseek", "openai"}:
             raise AIAgentServiceError("AI provider 必须是 deepseek 或 openai。")
@@ -159,13 +171,15 @@ class AIAgentService:
             result = self.tools.execute(tool_name, decoded)
             duration_ms = int((time.perf_counter() - started) * 1000)
             summary = _result_summary(result)
+            awaiting_confirmation = result.get("status") == "confirmation_required"
             self.repository.log_tool_call(
                 conversation_id=conversation_id,
                 tool_name=tool_name,
                 arguments=decoded,
                 result_summary=summary,
                 duration_ms=duration_ms,
-                status="SUCCESS",
+                status="ERROR" if awaiting_confirmation else "SUCCESS",
+                error_code="CONFIRMATION_REQUIRED" if awaiting_confirmation else None,
             )
             return result, {
                 "tool_name": tool_name,
@@ -197,6 +211,95 @@ class AIAgentService:
                 "summary": result,
                 "duration_ms": duration_ms,
             }
+
+    def confirm_action(
+        self,
+        *,
+        conversation_id: str,
+        session_id: str,
+        action_id: str,
+        approve: bool,
+    ) -> dict[str, Any]:
+        action = self.repository.get_pending_action(
+            action_id,
+            conversation_id=conversation_id,
+            session_id=session_id,
+        )
+        if action is None:
+            raise AIAgentServiceError("待确认操作不存在或已过期。")
+        if action["status"] != "PENDING":
+            return {
+                "status": str(action["status"]).casefold(),
+                "action_id": action_id,
+                "result_summary": action.get("result_summary"),
+            }
+        if not approve:
+            self.repository.resolve_pending_action(
+                action_id,
+                status="REJECTED",
+                result_summary={"status": "rejected"},
+                resolved_by=self.operator_name,
+            )
+            self.repository.log_tool_call(
+                conversation_id=conversation_id,
+                tool_name=str(action["tool_name"]),
+                arguments=action["arguments"],
+                result_summary={"status": "rejected"},
+                duration_ms=0,
+                status="ERROR",
+                error_code="USER_REJECTED",
+            )
+            return {"status": "rejected", "action_id": action_id}
+
+        if not self.repository.claim_pending_action(
+            action_id,
+            conversation_id=conversation_id,
+            session_id=session_id,
+            resolved_by=self.operator_name,
+        ):
+            raise AIAgentServiceError("该操作已被其他请求处理或已过期。")
+        started = time.perf_counter()
+        try:
+            result = self.tools.execute(
+                str(action["tool_name"]),
+                action["arguments"],
+                allow_writes=True,
+            )
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            summary = _result_summary(result)
+            self.repository.resolve_pending_action(
+                action_id,
+                status="EXECUTED",
+                result_summary=summary,
+                resolved_by=self.operator_name,
+            )
+            self.repository.log_tool_call(
+                conversation_id=conversation_id,
+                tool_name=str(action["tool_name"]),
+                arguments=action["arguments"],
+                result_summary=summary,
+                duration_ms=duration_ms,
+                status="SUCCESS",
+            )
+            return {"status": "executed", "action_id": action_id, "result": result}
+        except Exception as exc:
+            summary = {"status": "error", "error_code": getattr(exc, "code", "WRITE_FAILED")}
+            self.repository.resolve_pending_action(
+                action_id,
+                status="FAILED",
+                result_summary=summary,
+                resolved_by=self.operator_name,
+            )
+            self.repository.log_tool_call(
+                conversation_id=conversation_id,
+                tool_name=str(action["tool_name"]),
+                arguments=action["arguments"],
+                result_summary=summary,
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                status="ERROR",
+                error_code=str(summary["error_code"]),
+            )
+            raise AIAgentServiceError("写入操作失败，数据库未完成本次操作。") from exc
 
     def _chat_completion_tools(self) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = []
@@ -233,6 +336,7 @@ class AIAgentService:
         ]
         tool_audits: list[dict[str, Any]] = []
         visualizations: list[dict[str, Any]] = []
+        pending_actions: list[dict[str, Any]] = []
         tools = self._chat_completion_tools()
 
         for _ in range(self.MAX_TOOL_ROUNDS + 1):
@@ -255,6 +359,7 @@ class AIAgentService:
                     answer=answer,
                     tool_calls=tuple(tool_audits),
                     visualizations=self._deduplicate_visualizations(visualizations),
+                    pending_actions=tuple(pending_actions),
                 )
 
             messages.append(
@@ -290,6 +395,16 @@ class AIAgentService:
                     raw_arguments=str(_item_value(function, "arguments", "{}")),
                 )
                 tool_audits.append(audit)
+                if result.get("status") == "confirmation_required":
+                    action = result.get("action")
+                    if isinstance(action, dict):
+                        pending_actions.append(action)
+                    return AIAgentResponse(
+                        answer="我已生成待确认操作，请核对变更内容后再点击确认执行。",
+                        tool_calls=tuple(tool_audits),
+                        visualizations=self._deduplicate_visualizations(visualizations),
+                        pending_actions=tuple(pending_actions),
+                    )
                 visualizations.extend(
                     build_tool_visualizations(
                         str(_item_value(function, "name", "")),
@@ -322,6 +437,8 @@ class AIAgentService:
             session_id,
             title=cleaned_message[:80],
         )
+        self.tools.conversation_id = conversation_id
+        self.tools.session_id = session_id
         self.repository.add_message(conversation_id, "user", cleaned_message)
         history = self.repository.list_messages(conversation_id, limit=30)
         if self.provider == "deepseek" and hasattr(self.client, "chat"):
@@ -343,6 +460,7 @@ class AIAgentService:
                     "model": self.model,
                     "tool_calls": len(response.tool_calls),
                     "visualizations": list(response.visualizations),
+                    "pending_actions": list(response.pending_actions),
                 },
             )
             return response
@@ -352,6 +470,7 @@ class AIAgentService:
         ]
         tool_audits: list[dict[str, Any]] = []
         visualizations: list[dict[str, Any]] = []
+        pending_actions: list[dict[str, Any]] = []
         try:
             response = self.client.responses.create(
                 model=self.model,
@@ -379,6 +498,12 @@ class AIAgentService:
                         raw_arguments=str(_item_value(call, "arguments", "{}")),
                     )
                     tool_audits.append(audit)
+                    if result.get("status") == "confirmation_required":
+                        action = result.get("action")
+                        if isinstance(action, dict):
+                            pending_actions.append(action)
+                        response = None
+                        break
                     visualizations.extend(
                         build_tool_visualizations(
                             str(_item_value(call, "name", "")),
@@ -392,6 +517,8 @@ class AIAgentService:
                             "output": json.dumps(result, ensure_ascii=False, default=str),
                         }
                     )
+                if pending_actions:
+                    break
                 inputs.extend(outputs)
                 response = self.client.responses.create(
                     model=self.model,
@@ -425,7 +552,10 @@ class AIAgentService:
                 message = f"{provider_label} AI 请求失败，请稍后重试。"
             raise AIAgentServiceError(message) from exc
 
-        answer = str(_item_value(response, "output_text", "")).strip()
+        if pending_actions:
+            answer = "我已生成待确认操作，请核对变更内容后再点击确认执行。"
+        else:
+            answer = str(_item_value(response, "output_text", "")).strip()
         if not answer:
             raise AIAgentServiceError("AI 未返回可显示的回答。")
         safe_visualizations = self._deduplicate_visualizations(visualizations)
@@ -438,12 +568,14 @@ class AIAgentService:
                 "model": self.model,
                 "tool_calls": len(tool_audits),
                 "visualizations": list(safe_visualizations),
+                "pending_actions": list(pending_actions),
             },
         )
         return AIAgentResponse(
             answer=answer,
             tool_calls=tuple(tool_audits),
             visualizations=safe_visualizations,
+            pending_actions=tuple(pending_actions),
         )
 
     def _provider_error_message(self, exc: Exception) -> str:

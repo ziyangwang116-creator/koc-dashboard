@@ -33,6 +33,7 @@ import type {
   AgentStatus,
   AgentMessage,
   AgentReply,
+  AgentActionResult,
 } from "./types";
 
 interface Envelope<T> {
@@ -265,6 +266,11 @@ export const agentApi = {
     apiClient.post<{ data: AgentReply }>(
       `/agent/conversations/${conversationId}/messages`,
       { message }
+    ),
+  confirmAction: (conversationId: string, actionId: string, approve: boolean) =>
+    apiClient.post<{ data: AgentActionResult }>(
+      `/agent/conversations/${conversationId}/actions/${actionId}/confirm`,
+      { approve },
     ),
 };
 

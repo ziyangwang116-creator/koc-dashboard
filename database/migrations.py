@@ -56,6 +56,7 @@ AUTHORITATIVE_CONTRACT_PERIODS_MIGRATION_ID = (
 )
 CONTRACT_REVISION_AUDIT_MIGRATION_ID = "v2.0_contract_revision_audit"
 AI_AGENT_STORAGE_MIGRATION_ID = "v2.1_ai_agent_storage"
+AI_AGENT_WRITE_ACTIONS_MIGRATION_ID = "v2.5_ai_agent_write_actions"
 DASHBOARD_IMPORT_SNAPSHOT_MIGRATION_ID = "v2.2_dashboard_import_batch_snapshot"
 SETTLEMENT_LOCK_AUDIT_MIGRATION_ID = "v2.3_settlement_lock_audit"
 COMPENSATION_CALCULATION_CACHE_MIGRATION_ID = "v2.4_compensation_calculation_cache"
@@ -798,6 +799,35 @@ def _create_ai_agent_storage(connection: sqlite3.Connection) -> None:
     )
 
 
+def _create_ai_pending_actions(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_pending_action (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            arguments_json TEXT NOT NULL,
+            preview_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (
+                status IN ('PENDING', 'APPROVED', 'REJECTED', 'EXECUTED', 'FAILED', 'EXPIRED')
+            ),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            expires_at TEXT NOT NULL,
+            resolved_at TEXT,
+            resolved_by TEXT,
+            result_summary_json TEXT,
+            FOREIGN KEY (conversation_id) REFERENCES ai_conversation(id)
+                ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ai_pending_action_session "
+        "ON ai_pending_action(session_id, status, created_at DESC)"
+    )
+
+
 def _create_grassroot_compensation_versions(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
@@ -1432,6 +1462,8 @@ def apply_migrations(
     _record_migration(connection, CONTRACT_REVISION_AUDIT_MIGRATION_ID)
     _create_ai_agent_storage(connection)
     _record_migration(connection, AI_AGENT_STORAGE_MIGRATION_ID)
+    _create_ai_pending_actions(connection)
+    _record_migration(connection, AI_AGENT_WRITE_ACTIONS_MIGRATION_ID)
     _create_dashboard_import_batch_snapshot(connection)
     _record_migration(connection, DASHBOARD_IMPORT_SNAPSHOT_MIGRATION_ID)
     _add_column_if_missing(

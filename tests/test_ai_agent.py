@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from ai.tools import AIToolRegistry
+from ai.tools import AIToolError, AIToolRegistry
 from ai.visualizations import build_tool_visualizations, sanitize_visualizations
 from database.ai_repository import AIRepository
 from database.dashboard_repository import DashboardRepository
@@ -90,7 +90,7 @@ def test_ai_storage_migration_and_conversation_round_trip(tmp_path):
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
         }
-    assert {"ai_conversation", "ai_message", "ai_tool_audit"} <= tables
+    assert {"ai_conversation", "ai_message", "ai_tool_audit", "ai_pending_action"} <= tables
 
 
 def test_read_only_tools_use_creator_database_and_persisted_versions(tmp_path):
@@ -148,6 +148,24 @@ def test_read_only_tools_use_creator_database_and_persisted_versions(tmp_path):
     assert comparison["overall_change"]["views"]["decline_over_30_percent"] is True
     assert compensation["source"] == "persisted_compensation_versions_only"
     assert compensation["settlements"][0]["details"]["rank"] == "D"
+
+
+def test_operational_summary_is_database_backed_and_contains_ranked_metrics(tmp_path):
+    database_path = tmp_path / "ai.db"
+    _seed_ai_database(database_path)
+    result = AIToolRegistry(database_path).execute(
+        "get_operational_summary",
+        {"period_month": "2026-07", "include_cross_industry": False},
+    )
+
+    assert result["status"] == "ok"
+    assert result["source"] == "database_tool_result"
+    assert result["creator_count"] == 1
+    assert result["summary"]["post_count"] == 1
+    assert result["summary"]["views"] == 1000
+    assert result["summary"]["by_platform"][0]["source_platform"] == "YouTube"
+    assert result["top_creators_by_views"][0]["views"] == 1000
+    assert result["data_quality"]["unmatched_post_count"] == 0
 
 
 def test_month_comparison_visualizations_use_only_tool_result_values():
@@ -508,3 +526,106 @@ def test_agent_service_surfaces_wrapped_rate_limit_errors(tmp_path):
             session_id="session-1",
             message="查询达人",
         )
+
+
+def test_agent_write_requires_confirmation_then_updates_creator(tmp_path):
+    database_path = tmp_path / "ai-write.db"
+    creator = _seed_ai_database(database_path)
+    AIRepository(database_path).ensure_conversation("write-conversation", "session-1")
+    tools = AIToolRegistry(
+        database_path,
+        conversation_id="write-conversation",
+        session_id="session-1",
+        operator_name="张三",
+    )
+    arguments = {
+        "query": creator.koc_name,
+        "koc_name": None,
+        "homepage_url": None,
+        "youtube_homepage_url": None,
+        "tiktok_homepage_url": None,
+        "follower_count": None,
+        "youtube_follower_count": 12345,
+        "tiktok_follower_count": None,
+        "note": None,
+        "active": None,
+        "settlement_eligible": None,
+        "expected_updated_at": creator.updated_at,
+        "reason": "Agent 测试更新粉丝",
+    }
+
+    pending = tools.execute("update_creator_profile", arguments)
+
+    assert pending["status"] == "confirmation_required"
+    action_id = pending["action"]["action_id"]
+    assert KOCRepository(database_path).get(creator.id).youtube_follower_count == 5000
+
+    service = AIAgentService(
+        database_path,
+        api_key=None,
+        model="test-model",
+        provider="deepseek",
+        client=SimpleNamespace(),
+        session_id="session-1",
+        operator_name="张三",
+    )
+    result = service.confirm_action(
+        conversation_id="write-conversation",
+        session_id="session-1",
+        action_id=action_id,
+        approve=True,
+    )
+
+    assert result["status"] == "executed"
+    assert KOCRepository(database_path).get(creator.id).youtube_follower_count == 12345
+    pending_row = AIRepository(database_path).get_pending_action(
+        action_id,
+        conversation_id="write-conversation",
+        session_id="session-1",
+    )
+    assert pending_row["status"] == "EXECUTED"
+
+
+def test_agent_write_rejects_secrets_and_can_cancel_pending_action(tmp_path):
+    database_path = tmp_path / "ai-reject.db"
+    _seed_ai_database(database_path)
+    AIRepository(database_path).ensure_conversation("reject-conversation", "session-1")
+    tools = AIToolRegistry(
+        database_path,
+        conversation_id="reject-conversation",
+        session_id="session-1",
+    )
+    with pytest.raises(AIToolError, match="密钥"):
+        tools.execute(
+            "modify_project_file",
+            {
+                "path": ".env",
+                "old_text": "A",
+                "new_text": "B",
+                "expected_sha256": None,
+                "max_replacements": 1,
+                "reason": "不应允许",
+            },
+        )
+
+    arguments = {
+        "period_month": "2026-07",
+        "jpy_to_usd_rate": 0.0062,
+    }
+    pending = tools.execute("save_exchange_rate", arguments)
+    service = AIAgentService(
+        database_path,
+        api_key=None,
+        model="test-model",
+        provider="deepseek",
+        client=SimpleNamespace(),
+        session_id="session-1",
+    )
+    result = service.confirm_action(
+        conversation_id="reject-conversation",
+        session_id="session-1",
+        action_id=pending["action"]["action_id"],
+        approve=False,
+    )
+    assert result["status"] == "rejected"
+    assert DashboardRepository(database_path).get_jpy_to_usd_rate("2026-07") is None

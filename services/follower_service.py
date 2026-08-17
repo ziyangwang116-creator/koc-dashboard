@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -151,12 +150,8 @@ class FollowerService:
             return record.youtube_homepage_url
         if identify_platform(record.homepage_url) == "YouTube":
             return record.homepage_url
-
-        # A real YouTube channel ID can be queried directly even when the
-        # import did not include a separate homepage URL.
-        youtube_uid = (record.youtube_user_id or "").strip()
-        if re.fullmatch(r"UC[A-Za-z0-9_-]{20,}", youtube_uid):
-            return f"https://www.youtube.com/channel/{youtube_uid}"
+        # The company database UID is not a YouTube channel ID and must never
+        # be used as a lookup fallback.
         return None
 
     def fetch_follower_count(
