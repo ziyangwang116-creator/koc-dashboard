@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import base64
+import json
 import math
 import re
 import difflib
 import hashlib
 import os
+import subprocess
 import tempfile
+import threading
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import asdict, is_dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -104,6 +111,10 @@ class AIToolRegistry:
         "create_contract_change",
         "save_exchange_rate",
         "modify_project_file",
+        "import_posts_from_preview",
+        "rollback_post_import",
+        "start_follower_batch_update",
+        "publish_project_changes",
     }
 
     def __init__(
@@ -114,6 +125,11 @@ class AIToolRegistry:
         session_id: str | None = None,
         operator_name: str = "team",
         project_root: Path | str | None = None,
+        import_preview_store: Any | None = None,
+        follower_service_factory: Callable[[], Any] | None = None,
+        follower_job_store: Any | None = None,
+        git_enabled: bool | None = None,
+        deploy_hook_url: str | None = None,
     ) -> None:
         self.dashboard_repository = DashboardRepository(database_path)
         self.creator_repository = KOCRepository(database_path)
@@ -121,11 +137,32 @@ class AIToolRegistry:
         self.conversation_id = conversation_id
         self.session_id = session_id
         self.operator_name = str(operator_name).strip() or "team"
+        self.import_preview_store = import_preview_store
+        self.follower_service_factory = follower_service_factory
+        self.follower_job_store = follower_job_store
         self.project_root = (
             Path(project_root).resolve()
             if project_root is not None
             else Path(__file__).resolve().parents[1]
         )
+        env_git_enabled = os.environ.get("AGENT_GIT_ENABLED", "").strip().casefold()
+        self.git_enabled = (
+            bool(git_enabled)
+            if git_enabled is not None
+            else env_git_enabled in {"1", "true", "yes", "on"}
+        )
+        self.deploy_hook_url = (
+            str(deploy_hook_url).strip()
+            if deploy_hook_url is not None
+            else os.environ.get("AGENT_DEPLOY_HOOK_URL", "").strip()
+        )
+        allowed_branches = os.environ.get("AGENT_GIT_ALLOWED_BRANCHES", "main")
+        self.git_allowed_branches = {
+            item.strip() for item in allowed_branches.split(",") if item.strip()
+        } or {"main"}
+        self.git_target_branch = os.environ.get("AGENT_GIT_BRANCH", "main").strip() or "main"
+        self.github_repository = os.environ.get("AGENT_GITHUB_REPOSITORY", "").strip()
+        self.github_token = os.environ.get("AGENT_GITHUB_TOKEN", "").strip()
         self._records: list[KOCRecord] | None = None
         self._posts: pd.DataFrame | None = None
         self.handlers: dict[str, Callable[..., dict[str, Any]]] = {
@@ -139,10 +176,16 @@ class AIToolRegistry:
             "get_top_videos": self.get_top_videos,
             "audit_month_data": self.audit_month_data,
             "get_operational_summary": self.get_operational_summary,
+            "get_git_status": self.get_git_status,
+            "get_follower_update_job": self.get_follower_update_job,
             "update_creator_profile": self.update_creator_profile,
             "create_contract_change": self.create_contract_change,
             "save_exchange_rate": self.save_exchange_rate,
             "modify_project_file": self.modify_project_file,
+            "import_posts_from_preview": self.import_posts_from_preview,
+            "rollback_post_import": self.rollback_post_import,
+            "start_follower_batch_update": self.start_follower_batch_update,
+            "publish_project_changes": self.publish_project_changes,
         }
 
     @property
@@ -265,6 +308,13 @@ class AIToolRegistry:
     ) -> dict[str, Any]:
         if tool_name == "modify_project_file":
             return self._preview_project_file_change(arguments)
+        if tool_name in {
+            "import_posts_from_preview",
+            "rollback_post_import",
+            "start_follower_batch_update",
+            "publish_project_changes",
+        }:
+            return self._preview_operational_write(tool_name, arguments)
         if tool_name == "update_creator_profile":
             record = self._resolve_creator(arguments.get("query", ""))
             changes = {
@@ -308,6 +358,57 @@ class AIToolRegistry:
                 "period_month": period,
                 "jpy_to_usd_rate": rate,
             }
+        raise AIToolError(f"不允许调用工具：{tool_name}", code="UNKNOWN_TOOL")
+
+    def _preview_operational_write(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        if tool_name == "import_posts_from_preview":
+            entry = self._import_preview_entry(arguments.get("preview_token", ""))
+            mode = str(arguments.get("mode") or "").strip()
+            if mode not in {"replace_months", "append_or_update"}:
+                raise AIToolError("mode 必须为 replace_months 或 append_or_update。")
+            if entry.unmatched_rows:
+                raise AIToolError(
+                    "导入预览仍有未匹配达人，必须先修正达人库或源文件。",
+                    code="UNMATCHED_CREATORS",
+                )
+            if not entry.period_months:
+                raise AIToolError("导入预览没有可替换的数据月份。")
+            return {
+                "kind": "monthly_post_import",
+                "mode": "REPLACE_MONTHS" if mode == "replace_months" else "APPEND_OR_UPDATE",
+                "period_months": list(entry.period_months),
+                "source_files": list(entry.source_files),
+                "input_row_count": int(entry.input_row_count),
+                "matched_row_count": int(entry.matched_row_count),
+                "cross_industry_flagged_count": int(entry.cross_industry_flagged_count),
+                "column_warnings": list(entry.column_warnings),
+                "reason": str(arguments.get("reason") or "Agent 请求完整替换投稿数据"),
+            }
+        if tool_name == "rollback_post_import":
+            batch_id = int(arguments.get("batch_id") or 0)
+            batch = self.dashboard_repository.get_import_batch(batch_id)
+            if batch is None:
+                raise AIToolError("导入批次不存在。", code="NOT_FOUND")
+            if batch["mode"] != "REPLACE_MONTHS":
+                raise AIToolError("只有按月份完整替换的导入批次可以回滚。")
+            if batch.get("rolled_back_at"):
+                raise AIToolError("该导入批次已经回滚。", code="ALREADY_ROLLED_BACK")
+            reason = str(arguments.get("reason") or "").strip()
+            if not reason:
+                raise AIToolError("回滚原因不能为空。")
+            return {
+                "kind": "monthly_post_import_rollback",
+                **batch,
+                "reason": reason,
+            }
+        if tool_name == "start_follower_batch_update":
+            return self._preview_follower_batch(arguments)
+        if tool_name == "publish_project_changes":
+            return self._preview_git_publish(arguments)
         raise AIToolError(f"不允许调用工具：{tool_name}", code="UNKNOWN_TOOL")
 
     def _safe_project_path(self, raw_path: str) -> Path:
@@ -552,6 +653,519 @@ class AIToolRegistry:
             "reason": reason,
             "written_by": self.operator_name,
             "deployment_note": "代码已写入当前运行环境；是否部署仍需单独执行 Git/部署流程。",
+        }
+
+    def _import_preview_entry(self, preview_token: str) -> Any:
+        token = str(preview_token or "").strip()
+        if not token or self.import_preview_store is None:
+            raise AIToolError("没有可用的投稿导入预览，请先在 Agent 中上传 Excel。", code="PREVIEW_REQUIRED")
+        entry = self.import_preview_store.get(token)
+        if entry is None:
+            raise AIToolError("投稿导入预览不存在或已过期，请重新上传 Excel。", code="PREVIEW_EXPIRED")
+        return entry
+
+    def import_posts_from_preview(self, preview_token: str, mode: str, reason: str) -> dict[str, Any]:
+        store = self.import_preview_store
+        entry = self._import_preview_entry(preview_token)
+        normalized_mode = str(mode or "").strip()
+        if normalized_mode not in {"replace_months", "append_or_update"}:
+            raise AIToolError("mode 必须为 replace_months 或 append_or_update。")
+        lock = store.confirmation_lock() if hasattr(store, "confirmation_lock") else threading.RLock()
+        with lock:
+            entry = self._import_preview_entry(preview_token)
+            if entry.confirmed_body is not None:
+                return {
+                    "status": "ok",
+                    "already_confirmed": True,
+                    **dict(entry.confirmed_body.get("data", {})),
+                }
+            if entry.unmatched_rows:
+                raise AIToolError("导入预览仍有未匹配达人，不能写入数据库。", code="UNMATCHED_CREATORS")
+            result = self.dashboard_repository.save_monthly_import(
+                entry.data,
+                replace_months=normalized_mode == "replace_months",
+                source_files=entry.source_files,
+                file_hashes={name: "" for name in entry.source_files},
+            )
+            body = {
+                "data": {
+                    "batch_id": result.batch_id,
+                    "mode": (
+                        "REPLACE_MONTHS"
+                        if normalized_mode == "replace_months"
+                        else "APPEND_OR_UPDATE"
+                    ),
+                    "period_months": list(entry.period_months),
+                    "input_count": result.input_count,
+                    "saved_count": result.saved_count,
+                    "removed_count": result.removed_count,
+                }
+            }
+            entry.confirmed_batch_id = result.batch_id
+            entry.confirmed_body = body
+        self._posts = None
+        return {
+            "status": "ok",
+            **body["data"],
+            "reason": str(reason).strip(),
+            "written_by": self.operator_name,
+        }
+
+    def rollback_post_import(self, batch_id: int, reason: str) -> dict[str, Any]:
+        cleaned_reason = str(reason or "").strip()
+        if not cleaned_reason:
+            raise AIToolError("回滚原因不能为空。")
+        try:
+            result = self.dashboard_repository.rollback_import_batch(int(batch_id))
+        except ValueError as exc:
+            raise AIToolError(str(exc), code="ROLLBACK_REJECTED") from exc
+        self._posts = None
+        return {
+            "status": "ok",
+            **result,
+            "reason": cleaned_reason,
+            "written_by": self.operator_name,
+        }
+
+    def _follower_service(self) -> Any:
+        if self.follower_service_factory is None:
+            raise AIToolError("粉丝自动更新服务未配置。", code="FOLLOWER_SERVICE_NOT_CONFIGURED")
+        return self.follower_service_factory()
+
+    @staticmethod
+    def _normalized_follower_platform(value: str) -> str:
+        normalized = str(value or "").strip().casefold()
+        mapping = {"youtube": "YouTube", "tiktok": "TikTok", "both": "both"}
+        if normalized not in mapping:
+            raise AIToolError("platform 必须为 YouTube、TikTok 或 both。")
+        return mapping[normalized]
+
+    def _follower_candidates(self, service: Any, platform: str) -> list[KOCRecord]:
+        records = service.repository.list(active=True)
+        if platform == "YouTube":
+            return [record for record in records if service.has_youtube_contract(record)]
+        return [record for record in records if service.has_tiktok_contract(record)]
+
+    def _preview_follower_batch(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        platform = self._normalized_follower_platform(arguments.get("platform", ""))
+        service = self._follower_service()
+        platforms = ["YouTube", "TikTok"] if platform == "both" else [platform]
+        groups = []
+        for item in platforms:
+            candidates = self._follower_candidates(service, item)
+            missing_homepages = sum(
+                1 for record in candidates if not service._homepage_for_platform(record, item)
+            )
+            groups.append(
+                {
+                    "platform": item,
+                    "candidate_count": len(candidates),
+                    "missing_homepage_count": missing_homepages,
+                }
+            )
+        return {
+            "kind": "batch_follower_update",
+            "platform": platform,
+            "groups": groups,
+            "total_attempts": sum(item["candidate_count"] for item in groups),
+            "youtube_lookup_rule": "仅使用 YouTube 主页链接，不使用公司内部达人 ID",
+            "reason": str(arguments.get("reason") or "Agent 请求批量更新粉丝数"),
+        }
+
+    def _run_follower_job(self, job_id: str, platform: str) -> None:
+        store = self.follower_job_store
+        store.mark_running(job_id)
+        try:
+            service = self._follower_service()
+            platforms = ["YouTube", "TikTok"] if platform == "both" else [platform]
+            for item in platforms:
+                candidates = self._follower_candidates(service, item)
+
+                def progress_callback(completed: int, total: int, record: KOCRecord, outcome: Any) -> None:
+                    store.record_row(
+                        job_id,
+                        service._detail_row(outcome),
+                        status=outcome.status,
+                        platform=outcome.result.platform or item,
+                    )
+
+                service.update_many(
+                    [record.id for record in candidates],
+                    required_platform=item,
+                    progress_callback=progress_callback,
+                )
+            job = store.get(job_id)
+            if job is not None and int(job.get("success", 0)) > 0:
+                self.dashboard_repository.invalidate_compensation_calculation_cache(
+                    reason="Agent 批量更新达人粉丝数"
+                )
+            store.mark_succeeded(job_id)
+        except Exception:
+            store.mark_failed(job_id)
+
+    def start_follower_batch_update(self, platform: str, reason: str) -> dict[str, Any]:
+        normalized = self._normalized_follower_platform(platform)
+        if self.follower_job_store is None:
+            raise AIToolError("粉丝批量任务存储未配置。", code="FOLLOWER_JOB_STORE_NOT_CONFIGURED")
+        service = self._follower_service()
+        platforms = ["YouTube", "TikTok"] if normalized == "both" else [normalized]
+        total = sum(len(self._follower_candidates(service, item)) for item in platforms)
+        job_id = self.follower_job_store.create(total=total)
+        threading.Thread(
+            target=self._run_follower_job,
+            args=(job_id, normalized),
+            daemon=True,
+        ).start()
+        return {
+            "status": "accepted",
+            "job_id": job_id,
+            "platform": normalized,
+            "total": total,
+            "reason": str(reason).strip(),
+            "written_by": self.operator_name,
+        }
+
+    def get_follower_update_job(self, job_id: str, include_results: bool) -> dict[str, Any]:
+        if self.follower_job_store is None:
+            raise AIToolError("粉丝批量任务存储未配置。", code="FOLLOWER_JOB_STORE_NOT_CONFIGURED")
+        job = self.follower_job_store.get(str(job_id).strip())
+        if job is None:
+            raise AIToolError("粉丝批量更新任务不存在。", code="NOT_FOUND")
+        result = {key: value for key, value in job.items() if key != "rows"}
+        if include_results:
+            result["rows"] = list(job.get("rows", []))[:200]
+        return {"status": "ok", "job": result}
+
+    def _git_command(
+        self,
+        args: list[str],
+        *,
+        allowed_codes: set[int] | None = None,
+        timeout: int = 60,
+    ) -> subprocess.CompletedProcess[str]:
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=self.project_root,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise AIToolError("Git 命令无法执行。", code="GIT_UNAVAILABLE") from exc
+        if result.returncode not in (allowed_codes or {0}):
+            raise AIToolError("Git 操作失败，请在服务器日志中检查仓库凭据或分支状态。", code="GIT_FAILED")
+        return result
+
+    def _git_backend(self) -> str:
+        if not self.git_enabled:
+            raise AIToolError("Agent Git 功能未启用。", code="GIT_DISABLED")
+        if (self.project_root / ".git").exists():
+            return "local_git"
+        if self.github_repository and self.github_token:
+            return "github_api"
+        raise AIToolError(
+            "当前环境既没有 Git 工作区，也没有配置 Agent GitHub API。",
+            code="GIT_REPOSITORY_MISSING",
+        )
+
+    def _github_request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        allow_not_found: bool = False,
+    ) -> dict[str, Any] | None:
+        url = f"https://api.github.com/repos/{self.github_repository}/{path.lstrip('/')}"
+        body = json.dumps(payload).encode("utf-8") if payload is not None else None
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {self.github_token}",
+                "Content-Type": "application/json",
+                "User-Agent": "koc-agent",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            method=method,
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                raw = response.read()
+        except urllib.error.HTTPError as exc:
+            if allow_not_found and exc.code == 404:
+                return None
+            raise AIToolError(
+                "GitHub API 操作失败，请检查仓库名、令牌权限或分支保护规则。",
+                code="GITHUB_API_FAILED",
+            ) from exc
+        except Exception as exc:
+            raise AIToolError("GitHub API 当前不可用。", code="GITHUB_API_UNAVAILABLE") from exc
+        if not raw:
+            return {}
+        decoded = json.loads(raw.decode("utf-8"))
+        return decoded if isinstance(decoded, dict) else {}
+
+    @staticmethod
+    def _git_blob_sha(content: bytes) -> str:
+        header = b"blob " + str(len(content)).encode("ascii") + b"\0"
+        return hashlib.sha1(header + content).hexdigest()
+
+    def _github_path_change(self, path: str, branch: str) -> str | None:
+        file_path = self.project_root / path
+        if not file_path.exists() or not file_path.is_file():
+            raise AIToolError("GitHub API 模式暂不支持删除文件。", code="FILE_DELETE_NOT_SUPPORTED")
+        encoded_path = urllib.parse.quote(path, safe="/")
+        remote = self._github_request(
+            "GET",
+            f"contents/{encoded_path}?ref={urllib.parse.quote(branch, safe='')}",
+            allow_not_found=True,
+        )
+        local_sha = self._git_blob_sha(file_path.read_bytes())
+        if remote is None:
+            return f"?? {path}"
+        return None if str(remote.get("sha") or "") == local_sha else f" M {path}"
+
+    def _publish_github_api(
+        self,
+        paths: list[str],
+        commit_message: str,
+        branch: str,
+    ) -> str:
+        encoded_branch = urllib.parse.quote(branch, safe="")
+        reference = self._github_request("GET", f"git/ref/heads/{encoded_branch}") or {}
+        parent_sha = str((reference.get("object") or {}).get("sha") or "")
+        if not parent_sha:
+            raise AIToolError("无法读取 GitHub 目标分支。", code="GITHUB_BRANCH_NOT_FOUND")
+        parent_commit = self._github_request("GET", f"git/commits/{parent_sha}") or {}
+        base_tree = str((parent_commit.get("tree") or {}).get("sha") or "")
+        tree_entries = []
+        for path in paths:
+            content = (self.project_root / path).read_bytes()
+            blob = self._github_request(
+                "POST",
+                "git/blobs",
+                {"content": base64.b64encode(content).decode("ascii"), "encoding": "base64"},
+            ) or {}
+            tree_entries.append(
+                {"path": path, "mode": "100644", "type": "blob", "sha": str(blob.get("sha") or "")}
+            )
+        tree = self._github_request(
+            "POST",
+            "git/trees",
+            {"base_tree": base_tree, "tree": tree_entries},
+        ) or {}
+        commit = self._github_request(
+            "POST",
+            "git/commits",
+            {
+                "message": commit_message,
+                "tree": str(tree.get("sha") or ""),
+                "parents": [parent_sha],
+            },
+        ) or {}
+        commit_sha = str(commit.get("sha") or "")
+        if not commit_sha:
+            raise AIToolError("GitHub 未返回新提交编号。", code="GITHUB_COMMIT_FAILED")
+        self._github_request(
+            "PATCH",
+            f"git/refs/heads/{encoded_branch}",
+            {"sha": commit_sha, "force": False},
+        )
+        return commit_sha
+
+    def _ensure_git_available(self) -> str:
+        backend = self._git_backend()
+        if backend == "github_api":
+            branch = self.git_target_branch
+            if branch not in self.git_allowed_branches:
+                raise AIToolError("目标分支不在 Agent 允许提交的分支列表中。", code="GIT_BRANCH_NOT_ALLOWED")
+            return branch
+        if not self.git_enabled:
+            raise AIToolError("Agent Git 功能未启用。", code="GIT_DISABLED")
+        if not (self.project_root / ".git").exists():
+            raise AIToolError("当前运行环境不是可提交的 Git 工作区。", code="GIT_REPOSITORY_MISSING")
+        branch = self._git_command(["branch", "--show-current"]).stdout.strip()
+        if not branch or branch not in self.git_allowed_branches:
+            raise AIToolError("当前分支不在 Agent 允许提交的分支列表中。", code="GIT_BRANCH_NOT_ALLOWED")
+        return branch
+
+    def get_git_status(self) -> dict[str, Any]:
+        repository_available = (self.project_root / ".git").exists() or bool(
+            self.github_repository and self.github_token
+        )
+        if not self.git_enabled or not repository_available:
+            return {
+                "status": "ok",
+                "enabled": self.git_enabled,
+                "repository_available": repository_available,
+                "deploy_hook_configured": bool(self.deploy_hook_url),
+                "changed_files": [],
+            }
+        branch = self._ensure_git_available()
+        backend = self._git_backend()
+        lines = (
+            [line for line in self._git_command(["status", "--short"]).stdout.splitlines() if line.strip()]
+            if backend == "local_git"
+            else []
+        )
+        return {
+            "status": "ok",
+            "enabled": True,
+            "repository_available": True,
+            "branch": branch,
+            "backend": backend,
+            "allowed_branches": sorted(self.git_allowed_branches),
+            "deploy_hook_configured": bool(self.deploy_hook_url),
+            "changed_files": lines[:100],
+            "changed_file_count": len(lines),
+        }
+
+    def _normalize_git_paths(self, values: Any) -> list[str]:
+        if not isinstance(values, list) or not values:
+            raise AIToolError("paths 必须是非空文件列表。")
+        if len(values) > 50:
+            raise AIToolError("一次最多提交 50 个文件。")
+        paths = []
+        for value in values:
+            path = self._safe_project_path(str(value))
+            paths.append(str(path.relative_to(self.project_root)).replace("\\", "/"))
+        return list(dict.fromkeys(paths))
+
+    def _preview_git_publish(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        branch = self._ensure_git_available()
+        backend = self._git_backend()
+        paths = self._normalize_git_paths(arguments.get("paths"))
+        message = str(arguments.get("commit_message") or "").strip()
+        if len(message) < 5 or len(message) > 120 or "\n" in message:
+            raise AIToolError("commit_message 必须为 5-120 个字符的单行文本。")
+        changed = (
+            self._git_command(["status", "--short", "--", *paths]).stdout.splitlines()
+            if backend == "local_git"
+            else [
+                change
+                for path in paths
+                if (change := self._github_path_change(path, branch)) is not None
+            ]
+        )
+        if not changed:
+            raise AIToolError("指定文件没有可提交的改动。", code="NO_CHANGES")
+        push = bool(arguments.get("push"))
+        deploy = bool(arguments.get("deploy"))
+        if backend == "github_api" and not push:
+            raise AIToolError("GitHub API 模式必须同时推送提交。", code="GITHUB_PUSH_REQUIRED")
+        if backend == "local_git" and push:
+            self._git_command(["remote", "get-url", "origin"])
+        if deploy and not push:
+            raise AIToolError("部署前必须先推送提交，避免部署到旧代码。", code="DEPLOY_REQUIRES_PUSH")
+        return {
+            "kind": "git_publish",
+            "branch": branch,
+            "backend": backend,
+            "paths": paths,
+            "changes": changed,
+            "commit_message": message,
+            "push": push,
+            "deploy": deploy,
+            "deployment_method": (
+                "configured_hook" if self.deploy_hook_url else "git_push_auto_deploy"
+            ) if deploy else "not_requested",
+        }
+
+    def _trigger_agent_deployment(self, deploy: bool) -> str:
+        if not deploy:
+            return "not_requested"
+        if not self.deploy_hook_url:
+            return "triggered_by_git_push"
+        try:
+            request = urllib.request.Request(
+                self.deploy_hook_url,
+                data=b"{}",
+                headers={"Content-Type": "application/json", "User-Agent": "koc-agent"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=20) as response:
+                return "triggered" if 200 <= response.status < 300 else "failed"
+        except Exception:
+            return "failed"
+
+    def publish_project_changes(
+        self,
+        paths: list[str],
+        commit_message: str,
+        push: bool,
+        deploy: bool,
+    ) -> dict[str, Any]:
+        preview = self._preview_git_publish(
+            {
+                "paths": paths,
+                "commit_message": commit_message,
+                "push": push,
+                "deploy": deploy,
+            }
+        )
+        normalized_paths = list(preview["paths"])
+        if preview["backend"] == "github_api":
+            commit_sha = self._publish_github_api(
+                normalized_paths,
+                str(commit_message).strip(),
+                str(preview["branch"]),
+            )
+            deploy_status = self._trigger_agent_deployment(deploy)
+            return {
+                "status": "ok" if deploy_status != "failed" else "partial",
+                "commit_sha": commit_sha,
+                "branch": preview["branch"],
+                "paths": normalized_paths,
+                "push_status": "succeeded",
+                "deploy_status": deploy_status,
+                "backend": "github_api",
+                "written_by": self.operator_name,
+            }
+        self._git_command(["add", "--", *normalized_paths])
+        self._git_command(["diff", "--cached", "--check"])
+        staged = self._git_command(["diff", "--cached", "--name-only"]).stdout.splitlines()
+        if not staged:
+            raise AIToolError("暂存区没有可提交的改动。", code="NO_CHANGES")
+        self._git_command(["commit", "-m", str(commit_message).strip()], timeout=120)
+        commit_sha = self._git_command(["rev-parse", "HEAD"]).stdout.strip()
+        push_status = "not_requested"
+        if push:
+            try:
+                self._git_command(["push", "origin", f"HEAD:{preview['branch']}"], timeout=180)
+                push_status = "succeeded"
+            except AIToolError:
+                push_status = "failed"
+        deploy_status = "not_requested"
+        if deploy and push_status != "failed":
+            if self.deploy_hook_url:
+                try:
+                    request = urllib.request.Request(
+                        self.deploy_hook_url,
+                        data=b"{}",
+                        headers={"Content-Type": "application/json", "User-Agent": "koc-agent"},
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(request, timeout=20) as response:
+                        deploy_status = "triggered" if 200 <= response.status < 300 else "failed"
+                except Exception:
+                    deploy_status = "failed"
+            else:
+                deploy_status = "triggered_by_git_push"
+        return {
+            "status": "ok" if push_status != "failed" and deploy_status != "failed" else "partial",
+            "commit_sha": commit_sha,
+            "branch": preview["branch"],
+            "paths": staged,
+            "push_status": push_status,
+            "deploy_status": deploy_status,
+            "backend": "local_git",
+            "written_by": self.operator_name,
         }
 
     def search_creators(

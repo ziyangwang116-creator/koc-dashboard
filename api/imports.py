@@ -11,6 +11,7 @@ to ``core/cross_industry.py``).
 from __future__ import annotations
 
 import json
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -84,22 +85,29 @@ class PreviewStore:
 
     def __init__(self, ttl_seconds: int = PREVIEW_TTL_SECONDS) -> None:
         self.ttl_seconds = ttl_seconds
+        self._lock = threading.RLock()
         self._entries: dict[str, _PreviewEntry] = {}
 
     def create(self, **kwargs: Any) -> str:
         token = uuid.uuid4().hex
         kwargs["expires_at"] = time.time() + self.ttl_seconds
-        self._entries[token] = _PreviewEntry(**kwargs)
+        with self._lock:
+            self._entries[token] = _PreviewEntry(**kwargs)
         return token
 
     def get(self, token: str) -> _PreviewEntry | None:
-        entry = self._entries.get(token)
-        if entry is None:
-            return None
-        if time.time() >= entry.expires_at:
-            del self._entries[token]
-            return None
-        return entry
+        with self._lock:
+            entry = self._entries.get(token)
+            if entry is None:
+                return None
+            if time.time() >= entry.expires_at:
+                del self._entries[token]
+                return None
+            return entry
+
+    def confirmation_lock(self) -> threading.RLock:
+        """Serialize confirms that share this in-process preview cache."""
+        return self._lock
 
 
 @dataclass
@@ -141,9 +149,10 @@ def build_imports_router(
     timezone: str,
     require_session: Callable,
     session_context: Callable | None = None,
+    preview_store: PreviewStore | None = None,
 ) -> APIRouter:
     router = APIRouter(dependencies=[require_session])
-    preview_store = PreviewStore()
+    preview_store = preview_store or PreviewStore()
     standardize_store = StandardizeStore()
     idempotency_cache = IdempotencyCache()
     # Simple in-process guard against two concurrent replace_months confirms

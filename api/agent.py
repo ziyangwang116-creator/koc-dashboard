@@ -80,6 +80,9 @@ def build_agent_router(
     api_key: str | None,
     base_url: str | None,
     service_factory: Callable[[], Any] | None = None,
+    import_preview_store: Any | None = None,
+    follower_service_factory: Callable[[], Any] | None = None,
+    follower_job_store: Any | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/agent", tags=["agent"], dependencies=[require_session])
     provider_name = str(provider).strip().casefold()
@@ -99,6 +102,9 @@ def build_agent_router(
             base_url=base_url,
             session_id=(context or {}).get("session_id"),
             operator_name=(context or {}).get("operator_name") or "team",
+            import_preview_store=import_preview_store,
+            follower_service_factory=follower_service_factory,
+            follower_job_store=follower_job_store,
         )
 
     def require_conversation(conversation_id: str, session_id: str) -> str:

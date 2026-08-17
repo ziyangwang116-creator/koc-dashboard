@@ -209,4 +209,82 @@ OPENAI_TOOLS: list[dict[str, Any]] = [
         ),
         "strict": True,
     },
+    {
+        "type": "function",
+        "name": "get_git_status",
+        "description": "读取当前项目 Git 分支和改动文件，不执行提交、推送或部署。",
+        "parameters": _object_schema({}),
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "get_follower_update_job",
+        "description": "查询 Agent 发起的 YouTube/TikTok 批量粉丝更新任务进度和结果。",
+        "parameters": _object_schema(
+            {
+                "job_id": {"type": "string"},
+                "include_results": {"type": "boolean"},
+            }
+        ),
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "import_posts_from_preview",
+        "description": "请求导入 Agent 页面已上传并预览的 Excel，可选择按月份完整替换或补充导入/更新，必须由用户确认后执行。",
+        "parameters": _object_schema(
+            {
+                "preview_token": {"type": "string"},
+                "mode": {
+                    "type": "string",
+                    "enum": ["replace_months", "append_or_update"],
+                },
+                "reason": {"type": "string"},
+            }
+        ),
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "rollback_post_import",
+        "description": "请求回滚一个可安全回滚的按月份完整替换投稿批次。必须提供原因并由用户确认。",
+        "parameters": _object_schema(
+            {
+                "batch_id": {"type": "integer", "minimum": 1},
+                "reason": {"type": "string", "minLength": 1},
+            }
+        ),
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "start_follower_batch_update",
+        "description": "请求批量自动更新 YouTube、TikTok 或两个平台的达人粉丝数。YouTube 仅使用主页链接。用户确认后启动后台任务。",
+        "parameters": _object_schema(
+            {
+                "platform": {"type": "string", "enum": ["YouTube", "TikTok", "both"]},
+                "reason": {"type": "string"},
+            }
+        ),
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "publish_project_changes",
+        "description": "请求将明确列出的项目文件提交到 Git，可选择推送并触发部署。不会暂存未列出的文件，必须由用户确认。",
+        "parameters": _object_schema(
+            {
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "maxItems": 50,
+                },
+                "commit_message": {"type": "string", "minLength": 5, "maxLength": 120},
+                "push": {"type": "boolean"},
+                "deploy": {"type": "boolean"},
+            }
+        ),
+        "strict": True,
+    },
 ]

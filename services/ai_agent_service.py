@@ -118,6 +118,11 @@ class AIAgentService:
         session_id: str | None = None,
         operator_name: str = "team",
         project_root: Path | str | None = None,
+        import_preview_store: Any | None = None,
+        follower_service_factory: Any | None = None,
+        follower_job_store: Any | None = None,
+        git_enabled: bool | None = None,
+        deploy_hook_url: str | None = None,
     ) -> None:
         self.repository = AIRepository(database_path)
         self.session_id = session_id
@@ -128,6 +133,11 @@ class AIAgentService:
             session_id=session_id,
             operator_name=self.operator_name,
             project_root=project_root,
+            import_preview_store=import_preview_store,
+            follower_service_factory=follower_service_factory,
+            follower_job_store=follower_job_store,
+            git_enabled=git_enabled,
+            deploy_hook_url=deploy_hook_url,
         )
         self.provider = str(provider).strip().casefold()
         if self.provider not in {"deepseek", "openai"}:

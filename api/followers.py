@@ -200,6 +200,7 @@ def build_followers_router(
     youtube_api_key: str | None = None,
     tiktok_browser_data_dir=None,
     tiktok_persistent_headless: bool = False,
+    job_store: JobStore | None = None,
 ) -> APIRouter:
     """Wrap `services.follower_service.FollowerService` as HTTP endpoints.
 
@@ -210,7 +211,7 @@ def build_followers_router(
     and an async job wrapper around `update_many`, per this phase's scope).
     """
     router = APIRouter(dependencies=[require_session])
-    job_store = JobStore()
+    job_store = job_store or JobStore()
 
     def _repository() -> KOCRepository:
         return KOCRepository(database_path)

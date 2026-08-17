@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import time
 from types import SimpleNamespace
 
 import pandas as pd
@@ -8,6 +10,8 @@ import pytest
 
 from ai.tools import AIToolError, AIToolRegistry
 from ai.visualizations import build_tool_visualizations, sanitize_visualizations
+from api.followers import JobStore
+from api.imports import PreviewStore
 from database.ai_repository import AIRepository
 from database.dashboard_repository import DashboardRepository
 from database.db import connect, init_db
@@ -629,3 +633,274 @@ def test_agent_write_rejects_secrets_and_can_cancel_pending_action(tmp_path):
     )
     assert result["status"] == "rejected"
     assert DashboardRepository(database_path).get_jpy_to_usd_rate("2026-07") is None
+
+
+def test_agent_import_preview_requires_confirmation_and_replaces_month(tmp_path):
+    database_path = tmp_path / "agent-import.db"
+    init_db(database_path)
+    preview_store = PreviewStore()
+    data = pd.DataFrame(
+        [
+            {
+                "source_file": "2026-07.xlsx",
+                "user_id": "creator-1",
+                "publish_date": "2026-07-05",
+                "source_platform": "YouTube",
+                "url": "https://youtube.test/new",
+                "views": 123,
+            }
+        ]
+    )
+    token = preview_store.create(
+        data=data,
+        unmatched_rows=[],
+        period_months=["2026-07"],
+        source_files=["2026-07.xlsx"],
+        input_row_count=1,
+        matched_row_count=1,
+        cross_industry_flagged_count=0,
+        column_warnings=[],
+    )
+    tools = AIToolRegistry(
+        database_path,
+        conversation_id="conversation-import",
+        session_id="session-1",
+        import_preview_store=preview_store,
+    )
+    arguments = {
+        "preview_token": token,
+        "mode": "replace_months",
+        "reason": "导入 7 月完整数据",
+    }
+
+    pending = tools.execute("import_posts_from_preview", arguments)
+    assert pending["status"] == "confirmation_required"
+    assert DashboardRepository(database_path).count_posts() == 0
+
+    result = tools.execute("import_posts_from_preview", arguments, allow_writes=True)
+    assert result["mode"] == "REPLACE_MONTHS"
+    assert result["saved_count"] == 1
+    assert DashboardRepository(database_path).count_posts() == 1
+
+
+def test_agent_import_preview_supports_append_or_update(tmp_path):
+    database_path = tmp_path / "agent-import-append.db"
+    repository = DashboardRepository(database_path)
+    repository.upsert_posts(
+        pd.DataFrame(
+            [{"publish_date": "2026-07-01", "source_platform": "YouTube", "url": "https://x/old"}]
+        )
+    )
+    preview_store = PreviewStore()
+    token = preview_store.create(
+        data=pd.DataFrame(
+            [{"publish_date": "2026-07-02", "source_platform": "YouTube", "url": "https://x/new"}]
+        ),
+        unmatched_rows=[],
+        period_months=["2026-07"],
+        source_files=["supplement.xlsx"],
+        input_row_count=1,
+        matched_row_count=1,
+        cross_industry_flagged_count=0,
+        column_warnings=[],
+    )
+    tools = AIToolRegistry(
+        database_path,
+        conversation_id="conversation-import-append",
+        session_id="session-1",
+        import_preview_store=preview_store,
+    )
+    arguments = {
+        "preview_token": token,
+        "mode": "append_or_update",
+        "reason": "补充一条投稿",
+    }
+
+    pending = tools.execute("import_posts_from_preview", arguments)
+    assert pending["action"]["preview"]["mode"] == "APPEND_OR_UPDATE"
+    result = tools.execute("import_posts_from_preview", arguments, allow_writes=True)
+    assert result["mode"] == "APPEND_OR_UPDATE"
+    assert repository.count_posts() == 2
+
+
+def test_agent_can_preview_and_rollback_latest_monthly_import(tmp_path):
+    database_path = tmp_path / "agent-rollback.db"
+    repository = DashboardRepository(database_path)
+    first = repository.save_monthly_import(
+        pd.DataFrame(
+            [{"publish_date": "2026-07-01", "source_platform": "YouTube", "url": "https://x/old"}]
+        ),
+        replace_months=True,
+        source_files=["old.xlsx"],
+        file_hashes={"old.xlsx": ""},
+    )
+    second = repository.save_monthly_import(
+        pd.DataFrame(
+            [{"publish_date": "2026-07-02", "source_platform": "YouTube", "url": "https://x/new"}]
+        ),
+        replace_months=True,
+        source_files=["new.xlsx"],
+        file_hashes={"new.xlsx": ""},
+    )
+    assert first.batch_id != second.batch_id
+    tools = AIToolRegistry(
+        database_path,
+        conversation_id="conversation-rollback",
+        session_id="session-1",
+    )
+    arguments = {"batch_id": second.batch_id, "reason": "误导入"}
+
+    pending = tools.execute("rollback_post_import", arguments)
+    assert pending["action"]["preview"]["period_months"] == ["2026-07"]
+    result = tools.execute("rollback_post_import", arguments, allow_writes=True)
+    assert result["restored_count"] == 1
+    assert DashboardRepository(database_path).load_posts().iloc[0]["url"] == "https://x/old"
+
+
+def test_agent_starts_and_reports_batch_follower_update(tmp_path):
+    database_path = tmp_path / "agent-followers.db"
+    init_db(database_path)
+    record = SimpleNamespace(id=1)
+
+    class FakeRepository:
+        def list(self, active=True):
+            return [record]
+
+    class FakeFollowerService:
+        repository = FakeRepository()
+
+        @staticmethod
+        def has_youtube_contract(item):
+            return True
+
+        @staticmethod
+        def has_tiktok_contract(item):
+            return False
+
+        @staticmethod
+        def _homepage_for_platform(item, platform):
+            return "https://youtube.com/@creator"
+
+        @staticmethod
+        def _detail_row(outcome):
+            return {"status": outcome.status, "platform": outcome.result.platform}
+
+        def update_many(self, record_ids, *, required_platform, progress_callback):
+            outcome = SimpleNamespace(
+                status="成功",
+                result=SimpleNamespace(platform=required_platform),
+            )
+            progress_callback(1, 1, record, outcome)
+
+    job_store = JobStore()
+    tools = AIToolRegistry(
+        database_path,
+        conversation_id="conversation-followers",
+        session_id="session-1",
+        follower_service_factory=FakeFollowerService,
+        follower_job_store=job_store,
+    )
+    arguments = {"platform": "YouTube", "reason": "月度更新"}
+    pending = tools.execute("start_follower_batch_update", arguments)
+    assert pending["action"]["preview"]["total_attempts"] == 1
+
+    accepted = tools.execute("start_follower_batch_update", arguments, allow_writes=True)
+    for _ in range(50):
+        job = tools.execute(
+            "get_follower_update_job",
+            {"job_id": accepted["job_id"], "include_results": True},
+        )["job"]
+        if job["status"] in {"SUCCEEDED", "FAILED"}:
+            break
+        time.sleep(0.01)
+    assert job["status"] == "SUCCEEDED"
+    assert job["processed"] == 1
+
+
+def test_agent_git_commit_stages_only_confirmed_paths(tmp_path):
+    project_root = tmp_path / "repo"
+    project_root.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=project_root, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Agent Test"], cwd=project_root, check=True)
+    subprocess.run(["git", "config", "user.email", "agent@example.test"], cwd=project_root, check=True)
+    tracked = project_root / "README.md"
+    tracked.write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=project_root, check=True)
+    subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=project_root, check=True, capture_output=True)
+    tracked.write_text("after\n", encoding="utf-8")
+
+    tools = AIToolRegistry(
+        tmp_path / "git-agent.db",
+        conversation_id="conversation-git",
+        session_id="session-1",
+        project_root=project_root,
+        git_enabled=True,
+    )
+    arguments = {
+        "paths": ["README.md"],
+        "commit_message": "Update readme",
+        "push": False,
+        "deploy": False,
+    }
+    pending = tools.execute("publish_project_changes", arguments)
+    assert pending["action"]["preview"]["paths"] == ["README.md"]
+
+    result = tools.execute("publish_project_changes", arguments, allow_writes=True)
+    assert result["push_status"] == "not_requested"
+    subject = subprocess.run(
+        ["git", "log", "-1", "--pretty=%s"],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert subject == "Update readme"
+
+
+def test_agent_github_api_backend_can_publish_without_local_git(tmp_path):
+    project_root = tmp_path / "cloud-source"
+    project_root.mkdir()
+    (project_root / "README.md").write_text("cloud update\n", encoding="utf-8")
+    tools = AIToolRegistry(
+        tmp_path / "github-agent.db",
+        conversation_id="conversation-github",
+        session_id="session-1",
+        project_root=project_root,
+        git_enabled=True,
+    )
+    tools.github_repository = "owner/repository"
+    tools.github_token = "test-token-never-returned"
+    calls = []
+
+    def fake_request(method, path, payload=None, *, allow_not_found=False):
+        calls.append((method, path, payload, allow_not_found))
+        if path.startswith("contents/"):
+            return {"sha": "remote-old-sha"}
+        if path.startswith("git/ref/heads/"):
+            return {"object": {"sha": "parent-sha"}}
+        if path == "git/commits/parent-sha":
+            return {"tree": {"sha": "base-tree-sha"}}
+        if path == "git/blobs":
+            return {"sha": "blob-sha"}
+        if path == "git/trees":
+            return {"sha": "tree-sha"}
+        if path == "git/commits":
+            return {"sha": "new-commit-sha"}
+        return {}
+
+    tools._github_request = fake_request
+    arguments = {
+        "paths": ["README.md"],
+        "commit_message": "Publish cloud update",
+        "push": True,
+        "deploy": True,
+    }
+    pending = tools.execute("publish_project_changes", arguments)
+    assert pending["action"]["preview"]["backend"] == "github_api"
+
+    result = tools.execute("publish_project_changes", arguments, allow_writes=True)
+    assert result["commit_sha"] == "new-commit-sha"
+    assert result["push_status"] == "succeeded"
+    assert result["deploy_status"] == "triggered_by_git_push"
+    assert "test-token-never-returned" not in json.dumps(result)
+    assert any(method == "PATCH" and path.startswith("git/refs/heads/") for method, path, _, _ in calls)

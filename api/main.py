@@ -22,9 +22,11 @@ from api.agent import build_agent_router
 from api.compensation import build_compensation_router
 from api.creators import build_creators_router
 from api.dashboard import build_dashboard_router
-from api.followers import build_followers_router
-from api.imports import build_imports_router
+from api.followers import JobStore, build_followers_router
+from api.imports import PreviewStore, build_imports_router
 from api.session_store import SessionStore
+from database.koc_repository import KOCRepository
+from services.follower_service import FollowerService
 
 SESSION_COOKIE_NAME = "koc_session"
 SESSION_MAX_AGE_SECONDS = 28800
@@ -156,6 +158,18 @@ def create_app(
     resolved_environment = environment or os.environ.get("APP_ENV", "development")
     secure_cookie = resolved_environment != "development"
     session_store = SessionStore(ttl_seconds=SESSION_MAX_AGE_SECONDS)
+    import_preview_store = PreviewStore()
+    follower_job_store = JobStore()
+
+    def create_follower_service() -> FollowerService:
+        if followers_service_factory is not None:
+            return followers_service_factory()
+        return FollowerService(
+            KOCRepository(resolved_settings.database_path),
+            youtube_api_key=resolved_settings.youtube_api_key,
+            tiktok_browser_data_dir=resolved_settings.tiktok_browser_data_dir,
+            tiktok_persistent_headless=resolved_settings.tiktok_persistent_headless,
+        )
 
     app = FastAPI(title="KOC Dashboard API")
     app.add_middleware(DatabaseResilienceMiddleware)
@@ -206,6 +220,7 @@ def create_app(
         timezone=resolved_settings.timezone,
         require_session=Depends(require_session),
         session_context=Depends(get_session_context),
+        preview_store=import_preview_store,
     )
     app.include_router(imports_router)
 
@@ -213,10 +228,11 @@ def create_app(
         database_path=resolved_settings.database_path,
         require_session=Depends(require_session),
         session_context=Depends(get_session_context),
-        service_factory=followers_service_factory,
+        service_factory=create_follower_service,
         youtube_api_key=resolved_settings.youtube_api_key,
         tiktok_browser_data_dir=resolved_settings.tiktok_browser_data_dir,
         tiktok_persistent_headless=resolved_settings.tiktok_persistent_headless,
+        job_store=follower_job_store,
     )
     app.include_router(followers_router)
 
@@ -230,6 +246,9 @@ def create_app(
         api_key=resolved_settings.ai_api_key,
         base_url=resolved_settings.ai_base_url,
         service_factory=agent_service_factory,
+        import_preview_store=import_preview_store,
+        follower_service_factory=create_follower_service,
+        follower_job_store=follower_job_store,
     )
     app.include_router(agent_router)
 

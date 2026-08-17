@@ -24,7 +24,7 @@ const mocks = vi.hoisted(() => ({
     data: { conversation_id: "32ee0527-bbc5-4392-965d-bd28ef2751ed" },
   })),
   messages: vi.fn(async () => ({ data: [] })),
-  sendMessage: vi.fn(async () => ({
+  sendMessage: vi.fn(async (_conversationId: string, _message: string) => ({
     data: {
       conversation_id: "32ee0527-bbc5-4392-965d-bd28ef2751ed",
       answer: "## 7 月分析\n\n**结论：** 投稿增长。\n\n| 指标 | 数值 |\n|---|---:|\n| 投稿 | 3021 |",
@@ -66,6 +66,21 @@ const mocks = vi.hoisted(() => ({
   confirmAction: vi.fn(async () => ({
     data: { status: "executed", action_id: "action-1", result: { status: "ok" } },
   })),
+  previewImport: vi.fn(async () => ({
+    data: {
+      preview_token: "preview-agent-1",
+      input_row_count: 12,
+      matched_row_count: 12,
+      period_months: ["2026-07"],
+      cross_industry_flagged_count: 0,
+      column_warnings: [],
+      additions: { count: 12, rows: [] },
+      updates: { count: 0, rows: [] },
+      removals: { count: 0, rows: [] },
+      unmatched_creators: { count: 0, rows: [] },
+      date_anomalies: { count: 0, rows: [] },
+    },
+  })),
 }));
 
 vi.mock("@/lib/endpoints", () => ({
@@ -75,6 +90,9 @@ vi.mock("@/lib/endpoints", () => ({
     messages: mocks.messages,
     sendMessage: mocks.sendMessage,
     confirmAction: mocks.confirmAction,
+  },
+  importsApi: {
+    preview: mocks.previewImport,
   },
   authApi: { logout: vi.fn(async () => ({ data: { authenticated: false } })) },
 }));
@@ -154,5 +172,30 @@ describe("AgentPage", () => {
         true,
       ),
     );
+  });
+
+  it("uploads an Excel preview before asking the Agent to import posts", async () => {
+    const user = userEvent.setup();
+    renderWithQueryClient(<AgentPage />);
+    await screen.findByText("DeepSeek · deepseek-chat");
+
+    const file = new File(["excel"], "2026-07.xlsx", {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+    await user.upload(
+      screen.getByLabelText("上传投稿 Excel", { selector: "input" }),
+      file,
+    );
+    expect(screen.getByText("2026-07.xlsx")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "发送问题" }));
+
+    await waitFor(() => expect(mocks.previewImport).toHaveBeenCalledWith([file]));
+    await waitFor(() =>
+      expect(mocks.sendMessage).toHaveBeenCalledWith(
+        "32ee0527-bbc5-4392-965d-bd28ef2751ed",
+        expect.stringContaining("preview_token=preview-agent-1"),
+      ),
+    );
+    expect(mocks.sendMessage.mock.calls.at(-1)?.[1]).toContain("补充导入/更新");
   });
 });

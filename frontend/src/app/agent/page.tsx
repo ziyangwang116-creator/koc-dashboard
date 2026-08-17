@@ -2,14 +2,14 @@
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bot, Check, ChevronDown, Database, Loader2, Plus, Send, ShieldCheck, X } from "lucide-react";
+import { Bot, Check, ChevronDown, Database, FileSpreadsheet, Loader2, Paperclip, Plus, Send, ShieldCheck, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AgentVisualization } from "@/components/AgentVisualization";
 import { AppShell } from "@/components/AppShell";
 import { ErrorState, LoadingState } from "@/components/DataStates";
 import { ApiError } from "@/lib/api-client";
-import { agentApi } from "@/lib/endpoints";
+import { agentApi, importsApi } from "@/lib/endpoints";
 import type { AgentMessage, AgentPendingAction } from "@/lib/types";
 
 const STORAGE_KEY = "koc-agent-conversation-id";
@@ -26,8 +26,10 @@ export default function AgentPage() {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [localMessages, setLocalMessages] = useState<AgentMessage[] | null>(null);
   const [input, setInput] = useState("");
+  const [attachment, setAttachment] = useState<File | null>(null);
   const [restored, setRestored] = useState(false);
   const streamEndRef = useRef<HTMLDivElement>(null);
+  const attachmentInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -64,7 +66,7 @@ export default function AgentPage() {
   }, [messages]);
 
   const sendMutation = useMutation({
-    mutationFn: async (message: string) => {
+    mutationFn: async ({ message, file }: { message: string; file: File | null }) => {
       let activeId = activeConversationId;
       if (!activeId) {
         const created = await agentApi.createConversation();
@@ -72,7 +74,22 @@ export default function AgentPage() {
         setConversationId(activeId);
         window.localStorage.setItem(STORAGE_KEY, activeId);
       }
-      return agentApi.sendMessage(activeId, message);
+      let modelMessage = message;
+      if (file) {
+        const preview = await importsApi.preview([file]);
+        const data = preview.data;
+        if (data.unmatched_creators.count > 0) {
+          throw new Error(`文件存在 ${data.unmatched_creators.count} 条未匹配达人，已停止导入。`);
+        }
+        modelMessage = `${message || "请导入这份投稿数据"}\n\n` +
+          `[系统已完成 Excel 导入预览，请调用 import_posts_from_preview。\n` +
+          `preview_token=${data.preview_token}\n` +
+          `period_months=${data.period_months.join(",")}\n` +
+          `input_row_count=${data.input_row_count}\n` +
+          `matched_row_count=${data.matched_row_count}\n` +
+          `支持按月份完整替换或补充导入/更新；如果用户没有说明模式，请先询问。]`;
+      }
+      return agentApi.sendMessage(activeId, modelMessage);
     },
     onSuccess: (response) => {
       setLocalMessages((current) => {
@@ -125,14 +142,25 @@ export default function AgentPage() {
     window.localStorage.setItem(STORAGE_KEY, response.data.conversation_id);
     setLocalMessages([]);
     setInput("");
+    clearAttachment();
+  }
+
+  function clearAttachment() {
+    setAttachment(null);
+    if (attachmentInputRef.current) attachmentInputRef.current.value = "";
   }
 
   function submitMessage(message: string) {
     const cleaned = message.trim();
-    if (!cleaned || sendMutation.isPending) return;
-    setLocalMessages([...messages, { role: "user", content: cleaned }]);
+    if ((!cleaned && !attachment) || sendMutation.isPending) return;
+    const file = attachment;
+    const displayMessage = file
+      ? `${cleaned || "导入投稿数据"}\n\n附件：${file.name}`
+      : cleaned;
+    setLocalMessages([...messages, { role: "user", content: displayMessage }]);
     setInput("");
-    sendMutation.mutate(cleaned);
+    clearAttachment();
+    sendMutation.mutate({ message: cleaned, file });
   }
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -261,6 +289,38 @@ export default function AgentPage() {
             </div>
 
             <form className="agent-composer" onSubmit={handleSubmit}>
+              <input
+                ref={attachmentInputRef}
+                type="file"
+                accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                className="agent-file-input"
+                aria-label="上传投稿 Excel"
+                onChange={(event) => setAttachment(event.target.files?.[0] ?? null)}
+              />
+              {attachment && (
+                <div className="agent-attachment">
+                  <FileSpreadsheet size={15} />
+                  <span>{attachment.name}</span>
+                  <button
+                    type="button"
+                    aria-label="移除附件"
+                    title="移除附件"
+                    onClick={clearAttachment}
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              )}
+              <button
+                type="button"
+                className="agent-attach-button"
+                aria-label="上传投稿 Excel"
+                title="上传投稿 Excel"
+                onClick={() => attachmentInputRef.current?.click()}
+                disabled={!status?.configured || sendMutation.isPending}
+              >
+                <Paperclip size={17} />
+              </button>
               <textarea
                 aria-label="向运营 Agent 提问"
                 value={input}
@@ -279,7 +339,7 @@ export default function AgentPage() {
                 type="submit"
                 aria-label="发送问题"
                 title="发送问题"
-                disabled={!input.trim() || !status?.configured || sendMutation.isPending}
+                disabled={(!input.trim() && !attachment) || !status?.configured || sendMutation.isPending}
               >
                 <Send size={17} />
               </button>

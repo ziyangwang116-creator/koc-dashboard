@@ -535,6 +535,33 @@ class DashboardRepository:
             )
         return pd.DataFrame(display_rows)
 
+    def get_import_batch(self, batch_id: int) -> dict[str, Any] | None:
+        """Return one import batch for confirmations and audit displays."""
+        with connect(self.database_path) as connection:
+            row = connection.execute(
+                """
+                SELECT id, mode, period_months_json, source_files_json,
+                       input_count, saved_count, removed_count, created_at,
+                       rolled_back_at
+                FROM dashboard_import_batch
+                WHERE id = ?
+                """,
+                (int(batch_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "batch_id": int(row["id"]),
+            "mode": str(row["mode"]),
+            "period_months": list(json.loads(str(row["period_months_json"]))),
+            "source_files": list(json.loads(str(row["source_files_json"]))),
+            "input_count": int(row["input_count"]),
+            "saved_count": int(row["saved_count"]),
+            "removed_count": int(row["removed_count"]),
+            "created_at": str(row["created_at"]),
+            "rolled_back_at": row["rolled_back_at"],
+        }
+
     def clear_posts(self) -> int:
         with connect(self.database_path) as connection:
             cursor = connection.execute("DELETE FROM dashboard_post")
