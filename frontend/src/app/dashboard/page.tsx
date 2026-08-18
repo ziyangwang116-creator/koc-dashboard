@@ -10,10 +10,12 @@ import {
   CalendarDays,
   ChartNoAxesCombined,
   Columns3,
+  Download,
   Eye,
   FileText,
   Gauge,
   Layers3,
+  Loader2,
   RotateCcw,
   SlidersHorizontal,
   UploadCloud,
@@ -41,6 +43,7 @@ import { AppShell } from "@/components/AppShell";
 import { DataTable, type Column } from "@/components/DataTable";
 import { StateShell } from "@/components/DataStates";
 import { ApiError } from "@/lib/api-client";
+import { downloadTableCsv } from "@/lib/csv-download";
 import { compensationApi, dashboardApi } from "@/lib/endpoints";
 import {
   creatorCategoryLabel,
@@ -117,6 +120,8 @@ export default function DashboardPage() {
   const [showDetails, setShowDetails] = useState(false);
   const [postPage, setPostPage] = useState(1);
   const [showColumnSettings, setShowColumnSettings] = useState(false);
+  const [isExportingPosts, setIsExportingPosts] = useState(false);
+  const [postExportError, setPostExportError] = useState("");
   const [visiblePostColumns, setVisiblePostColumns] = useState(
     DEFAULT_POST_COLUMN_KEYS
   );
@@ -469,6 +474,27 @@ export default function DashboardPage() {
     setIncludeCrossIndustry(false);
     setTrafficBoostMode("original");
     setPostPage(1);
+  }
+
+  async function handleDownloadPosts() {
+    if (!canQuery || isExportingPosts) return;
+    setIsExportingPosts(true);
+    setPostExportError("");
+    try {
+      const response = await dashboardApi.posts({
+        ...periodParams,
+        ...commonFilters,
+        page: 1,
+        page_size: 100,
+        export_all: true,
+      });
+      const periodLabel = periodMode === "month" ? effectiveMonth : effectiveWeekStart;
+      downloadTableCsv(`${periodLabel}_达人投稿明细`, postColumns, response.data);
+    } catch (error) {
+      setPostExportError(error instanceof ApiError ? error.message : "投稿明细导出失败，请稍后重试。");
+    } finally {
+      setIsExportingPosts(false);
+    }
   }
 
   return (
@@ -939,10 +965,23 @@ export default function DashboardPage() {
             <Panel title="数据月度总表" description="完整投稿明细" icon={FileText}>
               <div className="dashboard-table-toolbar">
                 <span>共 {fmtInt(postPagination?.total_items)} 条，当前第 {postPage} 页</span>
-                <button type="button" className="ui-button ui-button-outline" onClick={() => setShowColumnSettings((value) => !value)}>
-                  <Columns3 size={14} />字段设置
-                </button>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <button
+                    type="button"
+                    className="ui-button ui-button-outline"
+                    aria-label="下载达人投稿明细 CSV"
+                    disabled={postsQuery.isLoading || (postPagination?.total_items ?? 0) === 0 || isExportingPosts}
+                    onClick={handleDownloadPosts}
+                  >
+                    {isExportingPosts ? <Loader2 className="spin" size={14} /> : <Download size={14} />}
+                    {isExportingPosts ? "正在导出" : "下载 CSV"}
+                  </button>
+                  <button type="button" className="ui-button ui-button-outline" onClick={() => setShowColumnSettings((value) => !value)}>
+                    <Columns3 size={14} />字段设置
+                  </button>
+                </div>
               </div>
+              {postExportError && <div className="ui-alert ui-alert-error">{postExportError}</div>}
               {showColumnSettings && (
                 <ColumnSettings columns={allPostColumns} selected={visiblePostColumns} onChange={setVisiblePostColumns} />
               )}

@@ -627,6 +627,7 @@ def build_dashboard_router(*, database_path, require_session: Callable) -> APIRo
         q: str = Query(default=""),
         page: int = Query(default=1),
         page_size: int = Query(default=20),
+        export_all: bool = Query(default=False),
         sort: str = Query(default="-publish_date"),
     ) -> dict:
         if sort not in POSTS_SORT_WHITELIST:
@@ -662,16 +663,24 @@ def build_dashboard_router(*, database_path, require_session: Callable) -> APIRo
 
         rows = [_serialize_post_row(row) for _, row in data.iterrows()]
         total_items = len(rows)
-        total_pages = max(1, (total_items + page_size - 1) // page_size)
-        start = (page - 1) * page_size
-        page_rows = rows[start : start + page_size]
+        if export_all:
+            response_page = 1
+            response_page_size = max(total_items, 1)
+            total_pages = 1
+            page_rows = rows
+        else:
+            response_page = page
+            response_page_size = page_size
+            total_pages = max(1, (total_items + page_size - 1) // page_size)
+            start = (page - 1) * page_size
+            page_rows = rows[start : start + page_size]
 
         return {
             "data": page_rows,
             "meta": {
                 "pagination": {
-                    "page": page,
-                    "page_size": page_size,
+                    "page": response_page,
+                    "page_size": response_page_size,
                     "total_items": total_items,
                     "total_pages": total_pages,
                 }

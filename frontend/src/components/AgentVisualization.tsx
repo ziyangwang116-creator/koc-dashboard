@@ -38,6 +38,7 @@ export function AgentVisualization({ chart }: { chart: AgentVisualizationPayload
     setExporting(true);
     setExportError("");
     try {
+      await document.fonts?.ready;
       const dataUrl = await toPng(exportRef.current, {
         cacheBust: true,
         pixelRatio: 2,
@@ -48,7 +49,10 @@ export function AgentVisualization({ chart }: { chart: AgentVisualizationPayload
       const link = document.createElement("a");
       link.download = downloadName(chart.title);
       link.href = dataUrl;
+      link.style.display = "none";
+      document.body.appendChild(link);
       link.click();
+      link.remove();
     } catch {
       setExportError("PNG 导出失败，请稍后重试。")
     } finally {

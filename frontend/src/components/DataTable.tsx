@@ -8,6 +8,7 @@ export interface Column<T> {
   align?: "left" | "right";
   width?: number;
   render: (row: T) => ReactNode;
+  exportValue?: (row: T) => unknown;
   highlight?: (row: T) => boolean;
 }
 

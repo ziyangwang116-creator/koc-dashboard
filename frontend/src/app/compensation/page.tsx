@@ -2,12 +2,14 @@
 
 import { useEffect, useState } from "react";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Download, Loader2 } from "lucide-react";
 import { AppShell } from "@/components/AppShell";
 import { DataTable } from "@/components/DataTable";
 import { StateShell } from "@/components/DataStates";
 import { ModeBadge } from "@/components/ModeBadge";
 import { compensationApi, dashboardApi } from "@/lib/endpoints";
 import { ApiError } from "@/lib/api-client";
+import { downloadTableCsv } from "@/lib/csv-download";
 import { fmtUsd, fmtInt } from "@/lib/format";
 import {
   grassrootColumns as fullGrassrootColumns,
@@ -16,6 +18,9 @@ import {
 } from "./columns";
 import type {
   CompensationMode,
+  CommentaryRow,
+  GrassrootRow,
+  LongTermRow,
   ThemeDefinition,
   ThemeCreatorOption,
   ThemeSubmission,
@@ -64,6 +69,7 @@ export default function CompensationPage() {
   const [activityDrafts, setActivityDrafts] = useState<Record<string, string>>({});
   const [themeDrafts, setThemeDrafts] = useState<ThemeSubmission[] | null>(null);
   const [themeEditorOpen, setThemeEditorOpen] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
 
   const queryClient = useQueryClient();
 
@@ -349,6 +355,48 @@ export default function CompensationPage() {
     },
     onError: (err) => setActionMessage({ kind: "error", text: errorMessageOf(err) }),
   });
+
+  async function handleDownloadCompensation() {
+    if (!effectiveMonth || isExporting) return;
+    setIsExporting(true);
+    setActionMessage(null);
+
+    const versionLabel = selectedVersion
+      ? `v${selectedVersion.version_no ?? selectedVersion.version_id}_${selectedVersion.status}`
+      : "当前预览";
+
+    try {
+      if (lane === "GRASSROOT") {
+        const rows: GrassrootRow[] = [...(grassrootQuery.data?.data ?? [])];
+        const totalPages = grassrootQuery.data?.meta.pagination.total_pages ?? 1;
+        for (let page = 2; page <= totalPages; page += 1) {
+          const response = await compensationApi.grassroot({ ...baseParams, page });
+          rows.push(...response.data);
+        }
+        downloadTableCsv(`${effectiveMonth}_草根结算_${versionLabel}`, fullGrassrootColumns, rows);
+      } else if (lane === "LONG_TERM") {
+        const rows: LongTermRow[] = [...(longTermQuery.data?.data ?? [])];
+        const totalPages = longTermQuery.data?.meta.pagination.total_pages ?? 1;
+        for (let page = 2; page <= totalPages; page += 1) {
+          const response = await compensationApi.longTerm({ ...baseParams, page });
+          rows.push(...response.data);
+        }
+        downloadTableCsv(`${effectiveMonth}_长包结算_${versionLabel}`, fullLongTermColumns, rows);
+      } else {
+        const rows: CommentaryRow[] = [...(commentaryQuery.data?.data ?? [])];
+        const totalPages = commentaryQuery.data?.meta.pagination.total_pages ?? 1;
+        for (let page = 2; page <= totalPages; page += 1) {
+          const response = await compensationApi.commentary({ ...baseParams, page });
+          rows.push(...response.data);
+        }
+        downloadTableCsv(`${effectiveMonth}_解说结算_${versionLabel}`, fullCommentaryColumns, rows);
+      }
+    } catch (error) {
+      setActionMessage({ kind: "error", text: errorMessageOf(error) });
+    } finally {
+      setIsExporting(false);
+    }
+  }
 
   return (
     <AppShell currentPeriod={effectiveMonth}>
@@ -652,6 +700,19 @@ export default function CompensationPage() {
         )}
 
         <div style={panelStyle}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 10 }}>
+            <strong style={{ fontSize: 13 }}>{laneLabel}结算明细</strong>
+            <button
+              type="button"
+              className="ui-button ui-button-outline"
+              aria-label={`下载${laneLabel}结算明细 CSV`}
+              disabled={activeQuery.isLoading || (activeQuery.data?.data.length ?? 0) === 0 || isExporting}
+              onClick={handleDownloadCompensation}
+            >
+              {isExporting ? <Loader2 className="spin" size={15} /> : <Download size={15} />}
+              {isExporting ? "正在导出" : "下载 CSV"}
+            </button>
+          </div>
           {lane === "GRASSROOT" && (
             <StateShell
               isLoading={grassrootQuery.isLoading}
