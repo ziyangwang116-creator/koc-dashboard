@@ -237,6 +237,22 @@ export interface ImportDiffBucket {
   rows: Record<string, unknown>[];
 }
 
+export interface SmartImportFileDiagnostic {
+  source_file: string;
+  source_columns: string[];
+  column_mapping: Record<string, string>;
+  auto_mapped_columns: string[];
+  date_method_counts: Record<string, number>;
+  date_min: string | null;
+  date_max: string | null;
+  warnings: string[];
+}
+
+export interface SmartImportDiagnostic {
+  enabled: boolean;
+  files: SmartImportFileDiagnostic[];
+}
+
 export interface ImportPreview {
   preview_token: string;
   input_row_count: number;
@@ -244,6 +260,7 @@ export interface ImportPreview {
   period_months: string[];
   cross_industry_flagged_count: number;
   column_warnings: string[];
+  smart_import?: SmartImportDiagnostic;
   additions: ImportDiffBucket;
   updates: ImportDiffBucket;
   removals: ImportDiffBucket;

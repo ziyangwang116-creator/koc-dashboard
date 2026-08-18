@@ -65,6 +65,45 @@ def test_single_file_uses_same_batch_pipeline(tmp_path):
     assert result.overall.uploaded_files == 1
     assert result.overall.successful_files == 1
     assert len(result.data) == 1
+    assert result.smart_import_files[0]["column_mapping"]["timestamp"] == "timestamp"
+    assert result.smart_import_files[0]["date_method_counts"] == {"unix_ms": 1}
+
+
+def test_smart_import_reports_aliases_and_actual_date_range(tmp_path):
+    dataframe = _raw().rename(
+        columns={
+            "view": "播放量",
+            "subtype": "视频类型",
+            "title": "视频标题",
+            "userId": "达人ID",
+            "url": "视频链接",
+            "timestamp": "发布日期",
+        }
+    )
+    dataframe["发布日期"] = pd.Timestamp("2026-07-12")
+
+    result = MultiFileProcessor(tmp_path / "koc.db", "Asia/Shanghai").process(
+        [_file("supplement.xlsx", dataframe)]
+    )
+
+    diagnostic = result.smart_import_files[0]
+    assert result.overall.successful_files == 1
+    assert diagnostic["column_mapping"]["timestamp"] == "发布日期"
+    assert diagnostic["date_method_counts"] == {"excel_datetime": 1}
+    assert diagnostic["date_min"] == "2026-07-12"
+    assert diagnostic["date_max"] == "2026-07-12"
+
+
+def test_invalid_date_is_a_row_issue_instead_of_a_file_failure(tmp_path):
+    dataframe = _raw(timestamp="not-a-date")
+
+    result = MultiFileProcessor(tmp_path / "koc.db", "Asia/Shanghai").process(
+        [_file("invalid-date.xlsx", dataframe)]
+    )
+
+    assert result.overall.successful_files == 1
+    assert result.overall.invalid_timestamp_count == 1
+    assert result.exceptions["issue_type"].tolist() == ["INVALID_TIMESTAMP"]
 
 
 def test_corrupt_file_does_not_block_other_file(tmp_path):

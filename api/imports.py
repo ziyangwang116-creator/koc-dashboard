@@ -52,6 +52,23 @@ def _validation_error(message: str, field_name: str | None = None) -> HTTPExcept
     return HTTPException(status_code=422, detail={"error": error})
 
 
+def _parse_column_mapping(raw_value: str) -> dict[str, str] | None:
+    if not raw_value.strip():
+        return None
+    try:
+        value = json.loads(raw_value)
+    except json.JSONDecodeError as exc:
+        raise _validation_error("字段映射不是有效的 JSON。", "column_mapping_json") from exc
+    if not isinstance(value, dict):
+        raise _validation_error("字段映射必须是对象。", "column_mapping_json")
+    mapping = {
+        str(canonical).strip(): str(source).strip()
+        for canonical, source in value.items()
+        if str(canonical).strip() and str(source).strip()
+    }
+    return mapping or None
+
+
 def _not_found_error(message: str) -> HTTPException:
     return HTTPException(status_code=404, detail={"error": {"code": "NOT_FOUND", "message": message}})
 
@@ -71,6 +88,7 @@ class _PreviewEntry:
     cross_industry_flagged_count: int
     column_warnings: list[str]
     expires_at: float
+    date_anomaly_rows: list[dict[str, Any]] = field(default_factory=list)
     confirmed_batch_id: int | None = None
     confirmed_body: dict | None = None
 
@@ -239,11 +257,16 @@ def build_imports_router(
     @router.post("/api/imports/preview")
     async def preview_import(
         files: list[UploadFile] = File(...),
+        column_mapping_json: str = Form(default=""),
     ) -> dict:
         uploaded = await _uploaded_excels(files)
+        column_mapping = _parse_column_mapping(column_mapping_json)
 
         try:
-            result = MultiFileProcessor(database_path, timezone).process(uploaded)
+            result = MultiFileProcessor(database_path, timezone).process(
+                uploaded,
+                column_mapping=column_mapping,
+            )
         except Exception as exc:  # noqa: BLE001 - surfaced as a business validation error
             raise _validation_error(f"文件解析失败：{exc}") from exc
 
@@ -299,6 +322,9 @@ def build_imports_router(
             for _, row in result.file_reports.iterrows()
             if row.get("status") == "失败" and row.get("error_message")
         ]
+        for diagnostic in result.smart_import_files:
+            column_warnings.extend(str(value) for value in diagnostic["warnings"])
+        column_warnings = list(dict.fromkeys(column_warnings))
 
         # Diff against currently-stored posts for the same months, so the
         # preview always surfaces additions/updates/removals even when the
@@ -332,6 +358,7 @@ def build_imports_router(
         token = preview_store.create(
             data=data,
             unmatched_rows=unmatched_rows,
+            date_anomaly_rows=date_anomaly_rows,
             period_months=period_months,
             source_files=source_files,
             input_row_count=input_row_count,
@@ -349,6 +376,10 @@ def build_imports_router(
                     "period_months": period_months,
                     "cross_industry_flagged_count": cross_industry_flagged_count,
                     "column_warnings": column_warnings,
+                    "smart_import": {
+                        "enabled": True,
+                        "files": list(result.smart_import_files),
+                    },
                     "additions": {"count": len(additions), "rows": additions},
                     "updates": {"count": len(updates), "rows": updates},
                     "removals": {"count": len(removals), "rows": removals},
@@ -401,6 +432,20 @@ def build_imports_router(
                         "code": "VALIDATION_ERROR",
                         "message": "存在未匹配的创建者 ID/姓名，无法确认导入，请先补录达人库或修正数据后重新预览。",
                         "field_errors": {"unmatched_rows": entry.unmatched_rows},
+                    }
+                },
+            )
+
+        if entry.date_anomaly_rows:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": {
+                        "code": "VALIDATION_ERROR",
+                        "message": "存在无法识别的发布日期，无法确认导入，请修正字段映射或日期后重新预览。",
+                        "field_errors": {
+                            "date_anomaly_rows": entry.date_anomaly_rows
+                        },
                     }
                 },
             )

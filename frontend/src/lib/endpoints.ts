@@ -280,7 +280,12 @@ export const importsApi = {
       processing_timezone: processingTimezone,
       deduplicate_urls: deduplicateUrls,
     }),
-  preview: (files: File[]) => uploadMultipart<{ data: ImportPreview }>("/imports/preview", files),
+  preview: (files: File[], columnMapping?: Record<string, string>) =>
+    uploadMultipart<{ data: ImportPreview }>("/imports/preview", files, "files", {
+      ...(columnMapping && Object.keys(columnMapping).length > 0
+        ? { column_mapping_json: JSON.stringify(columnMapping) }
+        : {}),
+    }),
   confirm: (previewToken: string, body: Record<string, unknown>, options?: WriteOptions) =>
     apiClient.post<{
       data: {

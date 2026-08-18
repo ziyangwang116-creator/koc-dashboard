@@ -18,6 +18,28 @@ const previewResponse: { data: ImportPreview } = {
     period_months: ["2026-01"],
     cross_industry_flagged_count: 0,
     column_warnings: [],
+    smart_import: {
+      enabled: true,
+      files: [
+        {
+          source_file: "a.xlsx",
+          source_columns: ["userId", "subtype", "title", "url", "timestamp", "view"],
+          column_mapping: {
+            userId: "userId",
+            subtype: "subtype",
+            title: "title",
+            url: "url",
+            timestamp: "timestamp",
+            view: "view",
+          },
+          auto_mapped_columns: [],
+          date_method_counts: { excel_datetime: 2 },
+          date_min: "2026-01-05",
+          date_max: "2026-01-06",
+          warnings: [],
+        },
+      ],
+    },
     additions: { count: 1, rows: [{ koc_name: "示例达人", platform: "TikTok", publish_date: "2026-01-05", title: "t1", url: "https://x.com/1" }] },
     updates: { count: 0, rows: [] },
     removals: { count: 0, rows: [] },
@@ -200,6 +222,48 @@ describe("ImportsPage", () => {
     const confirmBtn = await screen.findByRole("button", { name: "确认导入（补充导入）" });
     expect(confirmBtn).toBeDisabled();
     expect(screen.getByText(/无法确认导入/)).toBeInTheDocument();
+  });
+
+  it("renders smart recognition and re-previews with a manual mapping", async () => {
+    previewMock.mockResolvedValue(previewResponseNoUnmatched);
+    const user = userEvent.setup();
+    renderWithQueryClient(<ImportsPage />);
+
+    await user.upload(screen.getByLabelText("导入看板数据库文件"), fakeFile());
+    await user.click(screen.getByRole("button", { name: "生成预览" }));
+
+    expect(await screen.findByText("智能识别结果")).toBeInTheDocument();
+    expect(screen.getByText("Excel 日期：2")).toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText("字段映射 发布日期"), "timestamp");
+    await user.click(screen.getByRole("button", { name: "应用字段映射并重新预览" }));
+
+    await waitFor(() =>
+      expect(previewMock).toHaveBeenLastCalledWith(
+        [expect.objectContaining({ name: "a.xlsx" })],
+        expect.objectContaining({ timestamp: "timestamp" })
+      )
+    );
+  });
+
+  it("blocks confirmation when dates cannot be recognized", async () => {
+    previewMock.mockResolvedValueOnce({
+      data: {
+        ...previewResponseNoUnmatched.data,
+        date_anomalies: {
+          count: 1,
+          rows: [{ title: "bad date", reason: "发布时间无法解析", source_file: "a.xlsx" }],
+        },
+      },
+    });
+    const user = userEvent.setup();
+    renderWithQueryClient(<ImportsPage />);
+
+    await user.upload(screen.getByLabelText("导入看板数据库文件"), fakeFile());
+    await user.click(screen.getByRole("button", { name: "生成预览" }));
+
+    const confirmBtn = await screen.findByRole("button", { name: "确认导入（补充导入）" });
+    expect(confirmBtn).toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent("无法识别发布日期");
   });
 
   it("defaults to supplement import and requires a second explicit confirmation", async () => {

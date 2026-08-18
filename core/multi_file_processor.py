@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import pandas as pd
 
@@ -63,6 +63,7 @@ class MultiFileResult:
     exceptions: pd.DataFrame
     unmatched_uids: pd.DataFrame
     overall: OverallReport
+    smart_import_files: tuple[dict[str, Any], ...]
 
 
 class MultiFileProcessor:
@@ -128,12 +129,14 @@ class MultiFileProcessor:
         files: list[UploadedExcel],
         *,
         deduplicate_urls: bool = False,
+        column_mapping: Mapping[str, str] | None = None,
     ) -> MultiFileResult:
         internal_frames: list[pd.DataFrame] = []
         file_report_rows: list[dict[str, Any]] = []
         issue_rows: list[dict[str, Any]] = []
         successful_raw_rows = 0
         blank_subtype_count = 0
+        smart_import_files: list[dict[str, Any]] = []
 
         for uploaded in files:
             original_rows = 0
@@ -141,7 +144,10 @@ class MultiFileProcessor:
                 raw = read_excel_file(uploaded)
                 original_rows = len(raw)
                 successful_raw_rows += original_rows
-                transformed = self.pipeline.process(raw)
+                transformed = self.pipeline.process(
+                    raw,
+                    column_mapping=column_mapping,
+                )
             except Exception as exc:
                 message = (
                     str(exc)
@@ -176,10 +182,44 @@ class MultiFileProcessor:
             internal = transformed.data.copy().reset_index(drop=True)
             internal["_source_file"] = uploaded.name
             internal["_source_row"] = range(2, len(internal) + 2)
-            internal["_user_id"] = raw["userId"].map(normalize_user_id).reset_index(drop=True)
-            internal["_raw_timestamp"] = raw["timestamp"].reset_index(drop=True)
-            internal["_raw_subtype"] = raw["subtype"].reset_index(drop=True)
+            resolved = transformed.diagnostics.column_mapping
+            user_id_source = resolved["userId"]
+            timestamp_source = resolved["timestamp"]
+            subtype_source = resolved["subtype"]
+            internal["_user_id"] = (
+                raw[user_id_source].map(normalize_user_id).reset_index(drop=True)
+            )
+            internal["_raw_timestamp"] = raw[timestamp_source].reset_index(drop=True)
+            internal["_raw_subtype"] = raw[subtype_source].reset_index(drop=True)
             internal_frames.append(internal)
+
+            valid_dates = pd.to_datetime(
+                internal["publish_date"], errors="coerce"
+            ).dropna()
+            smart_import_files.append(
+                {
+                    "source_file": uploaded.name,
+                    "source_columns": list(transformed.diagnostics.source_columns),
+                    "column_mapping": dict(transformed.diagnostics.column_mapping),
+                    "auto_mapped_columns": list(
+                        transformed.diagnostics.auto_mapped_columns
+                    ),
+                    "date_method_counts": dict(
+                        transformed.diagnostics.date_method_counts
+                    ),
+                    "date_min": (
+                        valid_dates.min().date().isoformat()
+                        if not valid_dates.empty
+                        else None
+                    ),
+                    "date_max": (
+                        valid_dates.max().date().isoformat()
+                        if not valid_dates.empty
+                        else None
+                    ),
+                    "warnings": list(transformed.diagnostics.warnings),
+                }
+            )
 
             blank_subtype_count += transformed.report.blank_subtype_to_shorts_count
             unmatched_count = len(transformed.report.unmatched_uids)
@@ -285,4 +325,5 @@ class MultiFileProcessor:
             exceptions=exceptions,
             unmatched_uids=unmatched,
             overall=overall,
+            smart_import_files=tuple(smart_import_files),
         )

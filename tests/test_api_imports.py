@@ -78,11 +78,17 @@ def _row(user_id: str, *, url: str, title: str, date: str, views: int = 100) -> 
     }
 
 
-def _upload_preview(client, rows):
+def _upload_preview(client, rows, *, column_mapping=None):
     content = _xlsx_bytes(rows)
+    data = {}
+    if column_mapping is not None:
+        import json
+
+        data["column_mapping_json"] = json.dumps(column_mapping, ensure_ascii=False)
     response = client.post(
         "/api/imports/preview",
         files={"files": ("data.xlsx", content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        data=data,
     )
     return response
 
@@ -158,6 +164,71 @@ def test_preview_shows_all_four_categories(tmp_path):
     assert data["unmatched_creators"]["count"] == 1
     assert data["additions"]["count"] == 2
     assert data["preview_token"]
+    assert data["smart_import"]["enabled"] is True
+    assert data["smart_import"]["files"][0]["date_method_counts"] == {"unix_ms": 2}
+
+
+def test_preview_accepts_manual_column_mapping(tmp_path):
+    database_path = tmp_path / "koc.db"
+    creator = _seed_creator(database_path, f"{PREFIX}mapping")
+    client = _authenticated_client(database_path)
+    rows = [
+        {
+            "达人编号": creator.user_id,
+            "内容类型": "video",
+            "投稿标题": "mapped",
+            "投稿链接": "https://x.com/mapped",
+            "错误日期": "not-a-date",
+            "实际发布日期": pd.Timestamp("2026-07-12"),
+            "浏览量": 321,
+        }
+    ]
+
+    response = _upload_preview(
+        client,
+        rows,
+        column_mapping={
+            "userId": "达人编号",
+            "subtype": "内容类型",
+            "title": "投稿标题",
+            "url": "投稿链接",
+            "timestamp": "实际发布日期",
+            "view": "浏览量",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["period_months"] == ["2026-07"]
+    assert data["date_anomalies"]["count"] == 0
+    assert data["smart_import"]["files"][0]["column_mapping"]["timestamp"] == "实际发布日期"
+
+
+def test_confirm_is_blocked_by_unresolved_date_anomaly(tmp_path):
+    database_path = tmp_path / "koc.db"
+    creator = _seed_creator(database_path, f"{PREFIX}invalid-date")
+    client = _authenticated_client(database_path)
+    row = _row(
+        creator.user_id,
+        url="https://x.com/invalid-date",
+        title="invalid-date",
+        date="2026-01-05",
+    )
+    row["timestamp"] = "not-a-date"
+
+    preview = _upload_preview(client, [row])
+    assert preview.status_code == 200
+    preview_data = preview.json()["data"]
+    assert preview_data["date_anomalies"]["count"] == 1
+
+    response = client.post(
+        f"/api/imports/{preview_data['preview_token']}/confirm",
+        json={"mode": "append_or_update"},
+        headers={"Idempotency-Key": "invalid-date-confirm-1"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
 # ---------------------------------------------------------------------------

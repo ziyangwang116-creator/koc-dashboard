@@ -57,12 +57,37 @@ const IMPORT_MODE_COPY: Record<
   },
 };
 
+const SMART_FIELD_LABELS: Record<string, string> = {
+  view: "播放量",
+  subtype: "视频类型",
+  title: "标题",
+  userId: "达人 ID",
+  url: "视频链接",
+  timestamp: "发布日期",
+  platform: "平台",
+  likes: "点赞数",
+  comment: "评论数",
+  reposted: "转发数",
+  description: "描述",
+  collect: "收藏数",
+};
+
+const DATE_METHOD_LABELS: Record<string, string> = {
+  excel_datetime: "Excel 日期",
+  excel_serial: "Excel 日期序列号",
+  unix_ms: "毫秒时间戳",
+  unix_s: "秒级时间戳",
+  yyyymmdd: "YYYYMMDD",
+  date_text: "日期文本",
+};
+
 export default function ImportsPage() {
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [importMode, setImportMode] = useState<ImportMode>("append_or_update");
   const [preview, setPreview] = useState<ImportPreview | null>(null);
+  const [columnMapping, setColumnMapping] = useState<Record<string, string>>({});
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [confirmError, setConfirmError] = useState<string | null>(null);
   const [confirmDialogOpen, setConfirmDialogOpen] = useState(false);
@@ -87,14 +112,18 @@ export default function ImportsPage() {
   const exclusions = exclusionsQuery.data?.data ?? [];
 
   const previewMutation = useMutation({
-    mutationFn: (files: File[]) => importsApi.preview(files),
+    mutationFn: ({ files, mapping }: { files: File[]; mapping?: Record<string, string> }) =>
+      importsApi.preview(files, mapping),
     onSuccess: (res) => {
       setPreviewError(null);
       setPreview(res.data);
+      const firstFile = res.data.smart_import?.files[0];
+      if (firstFile) setColumnMapping(firstFile.column_mapping);
     },
     onError: (err) => {
       setPreviewError(errorMessageOf(err));
       setPreview(null);
+      setColumnMapping({});
     },
   });
 
@@ -154,6 +183,8 @@ export default function ImportsPage() {
   });
 
   const hasUnmatched = (preview?.unmatched_creators.count ?? 0) > 0;
+  const hasDateAnomalies = (preview?.date_anomalies.count ?? 0) > 0;
+  const hasBlockingIssues = hasUnmatched || hasDateAnomalies;
   const isReplaceMode = importMode === "replace_months";
   const importModeCopy = IMPORT_MODE_COPY[importMode];
 
@@ -239,13 +270,18 @@ export default function ImportsPage() {
               type="file"
               accept=".xlsx"
               multiple
-              onChange={(e) => setSelectedFiles(Array.from(e.target.files ?? []))}
+              onChange={(e) => {
+                setSelectedFiles(Array.from(e.target.files ?? []));
+                setPreview(null);
+                setColumnMapping({});
+                setPreviewError(null);
+              }}
             />
             <button
               type="button"
               style={primaryBtn}
               disabled={selectedFiles.length === 0 || previewMutation.isPending}
-              onClick={() => previewMutation.mutate(selectedFiles)}
+              onClick={() => previewMutation.mutate({ files: selectedFiles })}
             >
               {previewMutation.isPending ? "解析中…" : "生成预览"}
             </button>
@@ -265,6 +301,82 @@ export default function ImportsPage() {
                 <span>数据月份：{preview.period_months.join("、") || "—"}</span>
                 <span>命中异业排除：{preview.cross_industry_flagged_count}</span>
               </div>
+
+              {preview.smart_import?.enabled && preview.smart_import.files.length > 0 && (
+                <div style={smartImportPanelStyle}>
+                  <div>
+                    <strong>智能识别结果</strong>
+                    <div style={smartImportHintStyle}>
+                      系统按表格内容识别字段与日期，不使用文件名判断月份。
+                    </div>
+                  </div>
+                  {preview.smart_import.files.map((diagnostic) => (
+                    <div key={diagnostic.source_file} style={smartImportFileStyle}>
+                      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+                        <strong>{diagnostic.source_file}</strong>
+                        <span>
+                          日期范围：{diagnostic.date_min ?? "—"} 至 {diagnostic.date_max ?? "—"}
+                        </span>
+                        {Object.entries(diagnostic.date_method_counts).map(([method, count]) => (
+                          <span key={method} style={diagnosticTagStyle}>
+                            {DATE_METHOD_LABELS[method] ?? method}：{count}
+                          </span>
+                        ))}
+                      </div>
+                      <div style={mappingGridStyle}>
+                        {Object.entries(SMART_FIELD_LABELS).map(([canonical, label]) => (
+                          <label key={canonical} style={mappingFieldStyle}>
+                            <span>{label}</span>
+                            <select
+                              aria-label={`字段映射 ${label}`}
+                              value={columnMapping[canonical] ?? ""}
+                              disabled={selectedFiles.length !== 1}
+                              onChange={(event) =>
+                                setColumnMapping((current) => ({
+                                  ...current,
+                                  [canonical]: event.target.value,
+                                }))
+                              }
+                              style={mappingSelectStyle}
+                            >
+                              <option value="">未映射</option>
+                              {diagnostic.source_columns.map((source) => (
+                                <option key={source} value={source}>
+                                  {source}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        ))}
+                      </div>
+                      {selectedFiles.length === 1 ? (
+                        <button
+                          type="button"
+                          style={secondaryBtn}
+                          disabled={previewMutation.isPending}
+                          onClick={() =>
+                            previewMutation.mutate({
+                              files: selectedFiles,
+                              mapping: Object.fromEntries(
+                                Object.entries(columnMapping).filter(([, source]) => source)
+                              ),
+                            })
+                          }
+                        >
+                          应用字段映射并重新预览
+                        </button>
+                      ) : (
+                        <div style={smartImportHintStyle}>
+                          多文件导入会分别自动识别字段，手动映射仅支持单文件。
+                        </div>
+                      )}
+                      {diagnostic.warnings.map((warning) => (
+                        <div key={warning} style={warningTextStyle}>{warning}</div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
 
               <DiffSection title="新增" bucket={preview.additions} columns={diffColumns} />
               <DiffSection title="更新" bucket={preview.updates} columns={diffColumns} />
@@ -288,6 +400,13 @@ export default function ImportsPage() {
                 </div>
               )}
 
+              {hasDateAnomalies && (
+                <div style={alertStyle} role="alert">
+                  存在 {preview.date_anomalies.count}{" "}
+                  条无法识别发布日期的投稿，无法确认导入。请在「智能识别结果」中修正日期字段映射，或修改 Excel 日期后重新预览。
+                </div>
+              )}
+
               {confirmError && (
                 <div style={alertStyle} role="alert">
                   {confirmError}
@@ -297,9 +416,15 @@ export default function ImportsPage() {
               <div>
                 <button
                   type="button"
-                  style={hasUnmatched ? disabledBtn : primaryBtn}
-                  disabled={hasUnmatched}
-                  title={hasUnmatched ? "存在未匹配达人，确认导入已被阻止" : undefined}
+                  style={hasBlockingIssues ? disabledBtn : primaryBtn}
+                  disabled={hasBlockingIssues}
+                  title={
+                    hasUnmatched
+                      ? "存在未匹配达人，确认导入已被阻止"
+                      : hasDateAnomalies
+                        ? "存在无法识别的发布日期，确认导入已被阻止"
+                        : undefined
+                  }
                   onClick={() => setConfirmDialogOpen(true)}
                 >
                   确认导入（{importModeCopy.label}）
@@ -909,6 +1034,18 @@ const modalBox: React.CSSProperties = {
   boxShadow: "0 8px 30px rgba(0,0,0,0.2)",
 };
 
+const secondaryBtn: React.CSSProperties = {
+  background: "var(--color-surface)",
+  color: "var(--color-text)",
+  border: "1px solid var(--color-border)",
+  borderRadius: "var(--radius)",
+  padding: "7px 12px",
+  fontSize: 13,
+  fontWeight: 600,
+  cursor: "pointer",
+  justifySelf: "start",
+};
+
 const modeFieldset: React.CSSProperties = {
   border: 0,
   padding: 0,
@@ -995,6 +1132,66 @@ const warningStyle: React.CSSProperties = {
   borderRadius: "var(--radius)",
   padding: "8px 12px",
   fontSize: 12.5,
+};
+
+const smartImportPanelStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 12,
+  padding: 14,
+  border: "1px solid var(--color-border)",
+  borderRadius: "var(--radius)",
+  background: "var(--color-bg-subtle)",
+};
+
+const smartImportHintStyle: React.CSSProperties = {
+  color: "var(--color-text-muted)",
+  fontSize: 12,
+  marginTop: 4,
+};
+
+const smartImportFileStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 10,
+  paddingTop: 12,
+  borderTop: "1px solid var(--color-border)",
+};
+
+const diagnosticTagStyle: React.CSSProperties = {
+  background: "var(--color-primary-bg)",
+  color: "var(--color-primary-dark)",
+  borderRadius: 4,
+  padding: "2px 7px",
+  fontSize: 11.5,
+  fontWeight: 600,
+};
+
+const mappingGridStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+  gap: 8,
+};
+
+const mappingFieldStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 4,
+  color: "var(--color-text-muted)",
+  fontSize: 12,
+};
+
+const mappingSelectStyle: React.CSSProperties = {
+  width: "100%",
+  minWidth: 0,
+  padding: "6px 8px",
+  borderRadius: "var(--radius)",
+  border: "1px solid var(--color-border)",
+  background: "var(--color-surface)",
+  color: "var(--color-text)",
+  fontSize: 12.5,
+};
+
+const warningTextStyle: React.CSSProperties = {
+  color: "var(--color-warning)",
+  fontSize: 12,
 };
 
 const warningBadge: React.CSSProperties = {

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import re
+from collections import Counter
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from typing import Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pandas as pd
@@ -22,12 +26,13 @@ OUTPUT_COLUMNS = [
     "reposted",
 ]
 
-TRANSFORM_RULE_VERSION = "2.1.0"
+TRANSFORM_RULE_VERSION = "2.2.0"
 
 __all__ = [
     "DataTransformError",
     "OUTPUT_COLUMNS",
     "TRANSFORM_RULE_VERSION",
+    "TransformDiagnostics",
     "TransformResult",
     "transform_data",
 ]
@@ -43,6 +48,43 @@ REQUIRED_COLUMNS = [
 
 OPTIONAL_COLUMNS = ["likes", "comment", "reposted", "description", "collect"]
 
+SMART_IMPORT_COLUMNS = REQUIRED_COLUMNS + OPTIONAL_COLUMNS + ["platform"]
+
+COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
+    "view": (
+        "view", "views", "viewcount", "play", "playcount", "播放量", "浏览量",
+    ),
+    "subtype": (
+        "subtype", "videotype", "contenttype", "视频类型", "内容类型", "类型",
+    ),
+    "title": ("title", "videotitle", "标题", "视频标题", "投稿标题"),
+    "userId": (
+        "userid", "uid", "creatorid", "达人id", "博主id", "用户id",
+    ),
+    "url": ("url", "videourl", "link", "视频链接", "投稿链接", "链接"),
+    "timestamp": (
+        "timestamp", "publishtime", "publishedat", "publishdate", "date",
+        "发布时间", "发布日期", "投稿日期", "日期",
+    ),
+    "platform": ("platform", "sourceplatform", "平台", "来源平台"),
+    "likes": ("likes", "like", "likecount", "点赞", "点赞数"),
+    "comment": ("comment", "comments", "commentcount", "评论", "评论数"),
+    "reposted": (
+        "reposted", "repost", "reposts", "share", "sharecount", "转发", "转发数",
+    ),
+    "description": ("description", "desc", "caption", "描述", "文案"),
+    "collect": ("collect", "collection", "favorite", "收藏", "收藏数"),
+}
+
+DATE_METHOD_LABELS = {
+    "excel_datetime": "Excel 日期",
+    "excel_serial": "Excel 日期序列号",
+    "unix_ms": "毫秒时间戳",
+    "unix_s": "秒级时间戳",
+    "yyyymmdd": "YYYYMMDD 日期",
+    "date_text": "日期文本",
+}
+
 
 class DataTransformError(ValueError):
     """An input problem that can be shown directly to an end user."""
@@ -53,19 +95,86 @@ class TransformResult:
     data: pd.DataFrame
     report: ValidationReport
     exceptions: pd.DataFrame
+    diagnostics: "TransformDiagnostics"
+
+
+@dataclass(frozen=True)
+class TransformDiagnostics:
+    source_columns: tuple[str, ...]
+    column_mapping: dict[str, str]
+    auto_mapped_columns: tuple[str, ...]
+    date_method_counts: dict[str, int]
+    warnings: tuple[str, ...]
+
+
+def _normalized_header(value: object) -> str:
+    return re.sub(r"[\s_\-./（）()\[\]【】]+", "", str(value)).casefold()
+
+
+def _prepare_input_columns(
+    raw_data: pd.DataFrame,
+    column_mapping: Mapping[str, str] | None,
+) -> tuple[pd.DataFrame, dict[str, str], tuple[str, ...], tuple[str, ...]]:
+    source_columns = tuple(str(column) for column in raw_data.columns)
+    source_by_name = {str(column): column for column in raw_data.columns}
+    normalized_sources: dict[str, list[str]] = {}
+    for source in source_columns:
+        normalized_sources.setdefault(_normalized_header(source), []).append(source)
+
+    requested = {
+        str(canonical): str(source)
+        for canonical, source in (column_mapping or {}).items()
+        if str(source).strip()
+    }
+    unknown = sorted(set(requested) - set(SMART_IMPORT_COLUMNS))
+    if unknown:
+        raise DataTransformError(f"字段映射包含未知目标字段：{'、'.join(unknown)}。")
+
+    resolved: dict[str, str] = {}
+    auto_mapped: list[str] = []
+    warnings: list[str] = []
+    used_sources: set[str] = set()
+
+    for canonical in SMART_IMPORT_COLUMNS:
+        selected: str | None = None
+        requested_source = requested.get(canonical)
+        if requested_source is not None:
+            if requested_source not in source_by_name:
+                raise DataTransformError(
+                    f"字段映射中的来源列“{requested_source}”不存在。"
+                )
+            selected = requested_source
+        elif canonical in source_by_name:
+            selected = canonical
+        else:
+            matches: list[str] = []
+            for alias in COLUMN_ALIASES.get(canonical, (canonical,)):
+                matches.extend(normalized_sources.get(_normalized_header(alias), []))
+            matches = list(dict.fromkeys(matches))
+            if matches:
+                selected = matches[0]
+                auto_mapped.append(canonical)
+                if len(matches) > 1:
+                    warnings.append(
+                        f"字段 {canonical} 有多个候选列，已优先使用“{selected}”。"
+                    )
+        if selected is None:
+            continue
+        if selected in used_sources:
+            raise DataTransformError(f"来源列“{selected}”不能同时映射到多个字段。")
+        used_sources.add(selected)
+        resolved[canonical] = selected
+
+    prepared = raw_data.copy()
+    for canonical, source in resolved.items():
+        prepared[canonical] = raw_data[source]
+    for canonical in auto_mapped:
+        warnings.append(f"已自动将“{resolved[canonical]}”识别为 {canonical}。")
+    return prepared, resolved, tuple(auto_mapped), tuple(warnings)
 
 
 def _validate_input(raw_data: pd.DataFrame, timezone: str) -> None:
     missing_columns = [column for column in REQUIRED_COLUMNS if column not in raw_data]
-    normalized_columns = {
-        str(column).strip().casefold() for column in raw_data.columns
-    }
-    has_explicit_date = any(
-        candidate.casefold() in normalized_columns
-        for candidate in ("date", "publish_date", "published_at", "日期", "发布日期")
-    )
-    if has_explicit_date and "timestamp" in missing_columns:
-        missing_columns.remove("timestamp")
     if missing_columns:
         joined = "、".join(missing_columns)
         raise DataTransformError(
@@ -80,44 +189,81 @@ def _validate_input(raw_data: pd.DataFrame, timezone: str) -> None:
         ) from None
 
 
-def _convert_timestamp(series: pd.Series, timezone: str) -> pd.Series:
-    numeric = pd.to_numeric(series, errors="coerce")
-    timestamps = pd.to_datetime(numeric, unit="ms", utc=True, errors="coerce")
-    return timestamps.dt.tz_convert(timezone).dt.date
+def _parse_date_value(value: object, timezone: str) -> tuple[date | None, str | None]:
+    if value is None or value is pd.NA:
+        return None, None
+    try:
+        if bool(pd.isna(value)):
+            return None, None
+    except (TypeError, ValueError):
+        pass
+
+    if isinstance(value, (pd.Timestamp, datetime, date)):
+        timestamp = pd.Timestamp(value)
+        if timestamp.tzinfo is not None:
+            timestamp = timestamp.tz_convert(timezone)
+        return timestamp.date(), "excel_datetime"
+
+    text = str(value).strip()
+    if not text:
+        return None, None
+    numeric: float | None = None
+    try:
+        numeric = float(text.replace(",", ""))
+    except ValueError:
+        numeric = None
+
+    if numeric is not None:
+        integer = int(numeric)
+        if numeric == integer and 19_000_101 <= integer <= 21_001_231:
+            parsed = pd.to_datetime(str(integer), format="%Y%m%d", errors="coerce")
+            if pd.notna(parsed):
+                return parsed.date(), "yyyymmdd"
+        if 20_000 <= numeric <= 80_000:
+            return (date(1899, 12, 30) + timedelta(days=numeric)), "excel_serial"
+        unit = "ms" if abs(numeric) >= 100_000_000_000 else "s"
+        parsed = pd.to_datetime(numeric, unit=unit, utc=True, errors="coerce")
+        if pd.notna(parsed):
+            return parsed.tz_convert(timezone).date(), f"unix_{unit}"
+
+    parsed = pd.to_datetime(text, errors="coerce")
+    if pd.isna(parsed):
+        return None, None
+    timestamp = pd.Timestamp(parsed)
+    if timestamp.tzinfo is not None:
+        timestamp = timestamp.tz_convert(timezone)
+    return timestamp.date(), "date_text"
 
 
-def _build_publish_dates(raw_data: pd.DataFrame, timezone: str) -> pd.Series:
-    timestamp_source = (
-        raw_data["timestamp"]
-        if "timestamp" in raw_data
-        else pd.Series(pd.NA, index=raw_data.index, dtype="object")
-    )
-    publish_dates = _convert_timestamp(timestamp_source, timezone).astype("object")
-    normalized_columns = {
-        str(column).strip().casefold(): column for column in raw_data.columns
-    }
-    for candidate in (
-        "date",
-        "publish_date",
-        "published_at",
-        "日期",
-        "发布日期",
-    ):
-        column = normalized_columns.get(candidate.casefold())
-        if column is None:
-            continue
-        missing = publish_dates.isna()
-        if not missing.any():
-            break
-        explicit_dates = pd.to_datetime(raw_data.loc[missing, column], errors="coerce")
-        publish_dates.loc[missing] = explicit_dates.dt.date
-    missing_count = int(publish_dates.isna().sum())
-    if missing_count:
-        raise DataTransformError(
-            f"有 {missing_count} 条投稿缺少有效发布日期。"
-            "请填写 timestamp，或提供 date/日期/发布日期列后重新导入。"
+def _build_publish_dates(
+    raw_data: pd.DataFrame,
+    timezone: str,
+) -> tuple[pd.Series, dict[str, int]]:
+    publish_dates = pd.Series(pd.NA, index=raw_data.index, dtype="object")
+    method_counts: Counter[str] = Counter()
+    candidate_columns = [
+        column
+        for column in (
+            "timestamp",
+            "date",
+            "publish_date",
+            "published_at",
+            "日期",
+            "发布日期",
         )
-    return publish_dates
+        if column in raw_data
+    ]
+    for column in candidate_columns:
+        missing_indexes = publish_dates.index[publish_dates.isna()]
+        if len(missing_indexes) == 0:
+            break
+        for index in missing_indexes:
+            parsed, method = _parse_date_value(raw_data.at[index, column], timezone)
+            if parsed is None or method is None:
+                continue
+            publish_dates.at[index] = parsed
+            method_counts[method] += 1
+    return publish_dates, dict(method_counts)
 
 
 def _clean_optional_number(series: pd.Series) -> pd.Series:
@@ -181,10 +327,13 @@ def transform_data(
     raw_data: pd.DataFrame,
     mapper: KOCMapper,
     timezone: str,
+    column_mapping: Mapping[str, str] | None = None,
 ) -> TransformResult:
-    _validate_input(raw_data, timezone)
+    prepared_data, resolved_mapping, auto_mapped, mapping_warnings = (
+        _prepare_input_columns(raw_data, column_mapping)
+    )
+    _validate_input(prepared_data, timezone)
 
-    prepared_data = raw_data.copy()
     for column in OPTIONAL_COLUMNS:
         if column not in prepared_data:
             prepared_data[column] = pd.Series(
@@ -193,6 +342,7 @@ def transform_data(
 
     mapped_names, normalized_user_ids = mapper.map_series(prepared_data["userId"])
     platform = _build_platform(prepared_data)
+    publish_dates, date_method_counts = _build_publish_dates(prepared_data, timezone)
 
     reposted_source = prepared_data["reposted"]
 
@@ -200,7 +350,7 @@ def transform_data(
         {
             "koc_name": mapped_names,
             "platform": platform,
-            "publish_date": _build_publish_dates(prepared_data, timezone),
+            "publish_date": publish_dates,
             "title": prepared_data["title"],
             "url": prepared_data["url"],
             "views": _clean_optional_number(prepared_data["view"]),
@@ -219,4 +369,22 @@ def transform_data(
         mapped_names=mapped_names,
     )
     exceptions = _build_exceptions(prepared_data, normalized_user_ids, mapped_names)
-    return TransformResult(data=final_data, report=report, exceptions=exceptions)
+    warnings = list(mapping_warnings)
+    invalid_date_count = int(publish_dates.isna().sum())
+    if invalid_date_count:
+        warnings.append(f"有 {invalid_date_count} 条投稿缺少有效发布日期。")
+    if len(date_method_counts) > 1:
+        labels = [DATE_METHOD_LABELS.get(method, method) for method in date_method_counts]
+        warnings.append(f"日期列包含多种格式：{'、'.join(labels)}。")
+    return TransformResult(
+        data=final_data,
+        report=report,
+        exceptions=exceptions,
+        diagnostics=TransformDiagnostics(
+            source_columns=tuple(str(column) for column in raw_data.columns),
+            column_mapping=resolved_mapping,
+            auto_mapped_columns=auto_mapped,
+            date_method_counts=date_method_counts,
+            warnings=tuple(warnings),
+        ),
+    )

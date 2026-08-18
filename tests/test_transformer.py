@@ -121,7 +121,7 @@ def test_tiktok_override_has_priority_over_all_subtype_rules(mapper):
     assert result.data["platform"].tolist() == ["TikTok", "TikTok", "TikTok"]
 
 
-def test_missing_timestamp_and_explicit_date_fails_instead_of_using_url(mapper):
+def test_invalid_timestamp_is_retained_for_row_level_review(mapper):
     raw = make_raw_data().iloc[[0]].copy()
     raw["platform"] = "TikTok"
     raw["timestamp"] = pd.NA
@@ -129,8 +129,10 @@ def test_missing_timestamp_and_explicit_date_fails_instead_of_using_url(mapper):
         "https://www.tiktok.com/@namikari73/video/7665632070991039765"
     )
 
-    with pytest.raises(DataTransformError, match="1 条投稿缺少有效发布日期"):
-        transform_data(raw, mapper, "Asia/Shanghai")
+    result = transform_data(raw, mapper, "Asia/Shanghai")
+
+    assert pd.isna(result.data.loc[0, "publish_date"])
+    assert "有 1 条投稿缺少有效发布日期。" in result.diagnostics.warnings
 
 
 def test_explicit_date_column_is_used_when_timestamp_is_blank(mapper):
@@ -142,6 +144,65 @@ def test_explicit_date_column_is_used_when_timestamp_is_blank(mapper):
     result = transform_data(raw, mapper, "Asia/Shanghai")
 
     assert result.data["publish_date"].iloc[0] == date(2026, 7, 12)
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "expected_date", "expected_method"),
+    [
+        (pd.Timestamp("2026-07-12"), date(2026, 7, 12), "excel_datetime"),
+        (1783785600, date(2026, 7, 12), "unix_s"),
+        (46215, date(2026, 7, 12), "excel_serial"),
+        (20260712, date(2026, 7, 12), "yyyymmdd"),
+        ("2026/07/12", date(2026, 7, 12), "date_text"),
+    ],
+)
+def test_smart_import_recognizes_common_date_formats(
+    mapper, timestamp, expected_date, expected_method
+):
+    raw = make_raw_data().iloc[[0]].copy()
+    raw["timestamp"] = timestamp
+
+    result = transform_data(raw, mapper, "Asia/Shanghai")
+
+    assert result.data.loc[0, "publish_date"] == expected_date
+    assert result.diagnostics.date_method_counts == {expected_method: 1}
+
+
+def test_smart_import_recognizes_chinese_column_aliases(mapper):
+    raw = pd.DataFrame(
+        {
+            "播放量": [123],
+            "视频类型": ["short"],
+            "视频标题": ["智能导入"],
+            "达人ID": [107258],
+            "视频链接": ["https://example.com/smart"],
+            "发布日期": [pd.Timestamp("2026-07-12")],
+            "点赞数": [9],
+        }
+    )
+
+    result = transform_data(raw, mapper, "Asia/Shanghai")
+
+    assert result.data.loc[0, "views"] == 123
+    assert result.data.loc[0, "publish_date"] == date(2026, 7, 12)
+    assert result.diagnostics.column_mapping["timestamp"] == "发布日期"
+    assert "timestamp" in result.diagnostics.auto_mapped_columns
+
+
+def test_manual_mapping_overrides_existing_canonical_column(mapper):
+    raw = make_raw_data().iloc[[0]].copy()
+    raw["发布日期"] = pd.Timestamp("2026-07-12")
+    raw["timestamp"] = "not-a-date"
+
+    result = transform_data(
+        raw,
+        mapper,
+        "Asia/Shanghai",
+        column_mapping={"timestamp": "发布日期"},
+    )
+
+    assert result.data.loc[0, "publish_date"] == date(2026, 7, 12)
+    assert result.diagnostics.column_mapping["timestamp"] == "发布日期"
 
 
 def test_raw_platform_column_remains_optional(mapper):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Mapping
 
 import pandas as pd
 
@@ -15,5 +16,15 @@ class DataPipeline:
     mapper: KOCMapper
     timezone: str
 
-    def process(self, raw_data: pd.DataFrame) -> TransformResult:
-        return transform_data(raw_data, mapper=self.mapper, timezone=self.timezone)
+    def process(
+        self,
+        raw_data: pd.DataFrame,
+        *,
+        column_mapping: Mapping[str, str] | None = None,
+    ) -> TransformResult:
+        return transform_data(
+            raw_data,
+            mapper=self.mapper,
+            timezone=self.timezone,
+            column_mapping=column_mapping,
+        )
