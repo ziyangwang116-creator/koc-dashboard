@@ -203,13 +203,31 @@ def _date_str(value):
     return value.isoformat()
 
 
+def _int_or_zero(value) -> int:
+    """Serialize nullable numeric cells without evaluating pandas.NA as bool."""
+    numeric = pd.to_numeric(value, errors="coerce")
+    if pd.isna(numeric):
+        return 0
+    return int(numeric)
+
+
+def _bool_or_default(value, default: bool = False) -> bool:
+    """Serialize nullable boolean cells without evaluating pandas.NA as bool."""
+    normalized = _none_if_na(value)
+    if normalized is None:
+        return default
+    if isinstance(normalized, str):
+        return normalized.strip().casefold() not in {"", "0", "false", "no", "off", "disabled"}
+    return bool(normalized)
+
+
 def _serialize_post_row(row: pd.Series) -> dict:
     return {
         "source_file": _none_if_na(row.get("source_file")),
         "creator_key": row.get("creator_key"),
         "user_id": row.get("user_id"),
         "creator_id": _none_if_na(row.get("creator_id")),
-        "creator_active": bool(row.get("creator_active")),
+        "creator_active": _bool_or_default(row.get("creator_active")),
         "profile_effective_date": _date_str(row.get("profile_effective_date")),
         "koc_name": row.get("koc_name"),
         "creator_label": _none_if_na(row.get("creator_label")),
@@ -234,21 +252,21 @@ def _serialize_post_row(row: pd.Series) -> dict:
         "title": row.get("title"),
         "url": row.get("url"),
         "publish_date": _date_str(row.get("publish_date")),
-        "view": int(pd.to_numeric(row.get("view"), errors="coerce") or 0),
-        "original_views": int(pd.to_numeric(row.get("original_views"), errors="coerce") or 0),
-        "traffic_boost_views": int(pd.to_numeric(row.get("traffic_boost_views"), errors="coerce") or 0),
-        "boosted_views": int(pd.to_numeric(row.get("boosted_views"), errors="coerce") or 0),
-        "views": int(pd.to_numeric(row.get("views"), errors="coerce") or 0),
+        "view": _int_or_zero(row.get("view")),
+        "original_views": _int_or_zero(row.get("original_views")),
+        "traffic_boost_views": _int_or_zero(row.get("traffic_boost_views")),
+        "boosted_views": _int_or_zero(row.get("boosted_views")),
+        "views": _int_or_zero(row.get("views")),
         "likes": _none_if_na(row.get("likes")),
         "comment": _none_if_na(row.get("comment")),
         "reposted": _none_if_na(row.get("reposted")),
         "collect": _none_if_na(row.get("collect")),
         "cross_industry_url_key": _none_if_na(row.get("cross_industry_url_key")),
-        "matched": bool(row.get("matched")),
+        "matched": _bool_or_default(row.get("matched")),
         "profile_status": row.get("profile_status"),
-        "is_cross_industry": bool(row.get("is_cross_industry")),
-        "compensation_eligible": bool(row.get("compensation_eligible")),
-        "cross_industry_reason": row.get("cross_industry_reason") or None,
+        "is_cross_industry": _bool_or_default(row.get("is_cross_industry")),
+        "compensation_eligible": _bool_or_default(row.get("compensation_eligible")),
+        "cross_industry_reason": _none_if_na(row.get("cross_industry_reason")),
         "cross_industry_exclusion_id": _none_if_na(
             row.get("cross_industry_exclusion_id")
         ),

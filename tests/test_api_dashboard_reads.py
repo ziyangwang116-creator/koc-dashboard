@@ -2,7 +2,11 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch
 
 from api.main import create_app
-from api.dashboard import _collapse_creator_summary, _rank_unique_creator_summary
+from api.dashboard import (
+    _collapse_creator_summary,
+    _rank_unique_creator_summary,
+    _serialize_post_row,
+)
 from config.settings import Settings
 from database.dashboard_repository import DashboardRepository
 from database.db import connect
@@ -747,6 +751,81 @@ def test_posts_api_preserves_complete_monthly_detail_fields(tmp_path):
     }
     assert expected <= row.keys()
     assert row["description"] == "description value"
+
+
+def test_posts_api_serializes_nullable_cells_without_500(tmp_path):
+    database_path = tmp_path / "koc.db"
+    grassroot, _ = _seed_creators(database_path)
+    DashboardRepository(database_path).upsert_posts(
+        pd.DataFrame(
+            [
+                {
+                    "source_file": "nullable.xlsx",
+                    "user_id": grassroot.user_id,
+                    "creator_key": grassroot.user_id,
+                    "creator_label": grassroot.koc_name,
+                    "creator_category": "GRASSROOT",
+                    "contract_types": "TT",
+                    "matched": pd.NA,
+                    "profile_status": "MATCHED",
+                    "is_cross_industry": pd.NA,
+                    "compensation_eligible": pd.NA,
+                    "source_platform": "TikTok",
+                    "subtype": "tiktok",
+                    "content_type": "tiktok",
+                    "publish_date": "2026-07-01",
+                    "title": "Nullable post",
+                    "url": "https://tiktok.example/nullable",
+                    "views": pd.NA,
+                    "view": pd.NA,
+                    "original_views": pd.NA,
+                    "traffic_boost_views": pd.NA,
+                    "boosted_views": pd.NA,
+                    "description": pd.NA,
+                    "cross_industry_reason": pd.NA,
+                }
+            ]
+        )
+    )
+    client = _authenticated_client(database_path)
+
+    response = client.get(
+        "/api/dashboard/posts",
+        params={"period_mode": "month", "period_month": "2026-07"},
+    )
+
+    assert response.status_code == 200
+    row = response.json()["data"][0]
+    assert row["views"] == 0
+    assert isinstance(row["matched"], bool)
+    assert isinstance(row["is_cross_industry"], bool)
+    assert isinstance(row["compensation_eligible"], bool)
+
+
+def test_post_serializer_handles_pandas_na_cells():
+    row = _serialize_post_row(
+        pd.Series(
+            {
+                "creator_active": pd.NA,
+                "matched": pd.NA,
+                "is_cross_industry": pd.NA,
+                "compensation_eligible": pd.NA,
+                "view": pd.NA,
+                "original_views": pd.NA,
+                "traffic_boost_views": pd.NA,
+                "boosted_views": pd.NA,
+                "views": pd.NA,
+                "cross_industry_reason": pd.NA,
+            }
+        )
+    )
+
+    assert row["creator_active"] is False
+    assert row["matched"] is False
+    assert row["is_cross_industry"] is False
+    assert row["compensation_eligible"] is False
+    assert [row[key] for key in ("view", "original_views", "traffic_boost_views", "boosted_views", "views")] == [0, 0, 0, 0, 0]
+    assert row["cross_industry_reason"] is None
 
 
 # ---------------------------------------------------------------------------
